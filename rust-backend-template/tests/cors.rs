@@ -131,7 +131,6 @@ async fn a_refused_preflight_uses_problem_details() {
     assert_eq!(
         test::read_body_json::<Value, _>(response).await,
         json!({
-            "type": "about:blank",
             "title": "Bad Request",
             "status": 400,
         })

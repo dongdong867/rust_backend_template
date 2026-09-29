@@ -37,9 +37,11 @@ pub fn create_app(
         });
 
     App::new()
+        // Shared extractor and middleware state.
         .app_data(web::Data::new(http_config.clone()))
         .app_data(json_config)
         .app_data(web::PayloadConfig::new(http_config.request_body_limit))
+        // Registered inner-to-outer; request_id handles incoming requests first.
         .wrap(Condition::new(http_config.cors_enabled, cors))
         .wrap(from_fn(request_timeout))
         .wrap(ErrorHandlers::new().default_handler(ProblemDetails::error_response))

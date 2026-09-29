@@ -47,7 +47,6 @@ async fn assert_problem<B: MessageBody>(
     assert_eq!(
         test::read_body_json::<Value, _>(response).await,
         json!({
-            "type": "about:blank",
             "title": title,
             "status": status.as_u16(),
         })
@@ -150,7 +149,6 @@ async fn a_request_that_exceeds_the_deadline_uses_problem_details() {
     assert_eq!(
         serde_json::from_slice::<Value>(&body).unwrap(),
         json!({
-            "type": "about:blank",
             "title": "Gateway Timeout",
             "status": 504,
         })

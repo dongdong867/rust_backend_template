@@ -22,7 +22,6 @@ async fn assert_problem<B: MessageBody>(
     assert_eq!(
         test::read_body_json::<Value, _>(response).await,
         json!({
-            "type": "about:blank",
             "title": title,
             "status": status.as_u16(),
         })

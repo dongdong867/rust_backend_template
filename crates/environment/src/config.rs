@@ -61,48 +61,54 @@ impl Config {
                     _ => None,
                 },
             )?,
-            http: HttpConfig {
-                cors_enabled: setting(
-                    &lookup,
-                    "HTTP_CORS_ENABLED",
-                    HttpConfig::DEFAULT_CORS_ENABLED,
-                    "true or false",
-                    |value| match value {
-                        "true" => Some(true),
-                        "false" => Some(false),
-                        _ => None,
-                    },
-                )?,
-                cors_allowed_origins: setting(
-                    &lookup,
-                    "HTTP_CORS_ALLOWED_ORIGINS",
-                    Vec::new(),
-                    "a comma-separated list of HTTP or HTTPS origins without paths, or an empty list",
-                    parse_cors_allowed_origins,
-                )?,
-                request_timeout: setting(
-                    &lookup,
-                    "HTTP_REQUEST_TIMEOUT_SECS",
-                    HttpConfig::DEFAULT_REQUEST_TIMEOUT,
-                    "a positive number of seconds",
-                    |value| {
-                        value
-                            .parse()
-                            .ok()
-                            .filter(|seconds| *seconds > 0)
-                            .map(Duration::from_secs)
-                    },
-                )?,
-                request_body_limit: setting(
-                    &lookup,
-                    "HTTP_REQUEST_BODY_LIMIT_BYTES",
-                    HttpConfig::DEFAULT_REQUEST_BODY_LIMIT,
-                    "a positive number of bytes",
-                    |value| value.parse().ok().filter(|bytes| *bytes > 0),
-                )?,
-            },
+            http: read_http_config(&lookup)?,
         })
     }
+}
+
+fn read_http_config(
+    lookup: &impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
+) -> Result<HttpConfig, ConfigError> {
+    Ok(HttpConfig {
+        cors_enabled: setting(
+            lookup,
+            "HTTP_CORS_ENABLED",
+            HttpConfig::DEFAULT_CORS_ENABLED,
+            "true or false",
+            |value| match value {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            },
+        )?,
+        cors_allowed_origins: setting(
+            lookup,
+            "HTTP_CORS_ALLOWED_ORIGINS",
+            Vec::new(),
+            "a comma-separated list of HTTP or HTTPS origins without paths, or an empty list",
+            parse_cors_allowed_origins,
+        )?,
+        request_timeout: setting(
+            lookup,
+            "HTTP_REQUEST_TIMEOUT_SECS",
+            HttpConfig::DEFAULT_REQUEST_TIMEOUT,
+            "a positive number of seconds",
+            |value| {
+                value
+                    .parse()
+                    .ok()
+                    .filter(|seconds| *seconds > 0)
+                    .map(Duration::from_secs)
+            },
+        )?,
+        request_body_limit: setting(
+            lookup,
+            "HTTP_REQUEST_BODY_LIMIT_BYTES",
+            HttpConfig::DEFAULT_REQUEST_BODY_LIMIT,
+            "a positive number of bytes",
+            |value| value.parse().ok().filter(|bytes| *bytes > 0),
+        )?,
+    })
 }
 
 fn parse_cors_allowed_origins(value: &str) -> Option<Vec<String>> {

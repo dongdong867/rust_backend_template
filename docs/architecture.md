@@ -137,7 +137,7 @@ There is no shared crate holding every feature's SQL: a feature receives the sha
 Every client error and server error uses an RFC 9457 Problem Details body with `application/problem+json`:
 
 ```json
-{"type":"about:blank","title":"Not Found","status":404}
+{"title":"Not Found","status":404}
 ```
 
 The service package owns one replaceable mapping for both application and Actix failures.

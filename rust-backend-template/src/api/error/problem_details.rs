@@ -11,8 +11,6 @@ const PROBLEM_DETAILS_MEDIA_TYPE: &str = "application/problem+json";
 /// The safe RFC 9457 response returned for every HTTP error.
 #[derive(Serialize)]
 pub(crate) struct ProblemDetails {
-    #[serde(rename = "type")]
-    problem_type: &'static str,
     title: &'static str,
     status: u16,
 }
@@ -20,7 +18,6 @@ pub(crate) struct ProblemDetails {
 impl ProblemDetails {
     fn new(status: StatusCode) -> Self {
         Self {
-            problem_type: "about:blank",
             title: status.canonical_reason().unwrap_or("HTTP Error"),
             status: status.as_u16(),
         }
