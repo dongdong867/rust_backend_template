@@ -1,1 +1,5 @@
 /target
+
+# Local settings. Only the placeholder example is committed.
+*.env
+!.example.env

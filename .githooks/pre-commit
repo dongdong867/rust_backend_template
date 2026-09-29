@@ -1,0 +1,8 @@
+#!/bin/sh
+# Checks Rust and TOML formatting. It changes no files; CI runs the same checks.
+set -eu
+
+if ! make --no-print-directory fmt-check fmt-toml-check; then
+    echo "pre-commit: formatting check failed. Run 'make fmt', stage the result, and commit again." >&2
+    exit 1
+fi

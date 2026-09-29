@@ -1,0 +1,6 @@
+include = ["**/*.toml"]
+exclude = ["target/**"]
+
+[formatting]
+# Match rustfmt's line width.
+column_width = 100
