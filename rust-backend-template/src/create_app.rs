@@ -23,10 +23,15 @@ pub fn create_app(
         InitError = (),
     >,
 > {
-    let cors = http_config
-        .cors_allowed_origins
-        .iter()
-        .fold(Cors::default(), |cors, origin| cors.allowed_origin(origin))
+    let allowed_origins = http_config.cors_allowed_origins.clone();
+    let cors = Cors::default()
+        .allowed_origin_fn(move |origin, _request| {
+            origin.to_str().ok().is_some_and(|origin| {
+                allowed_origins
+                    .iter()
+                    .any(|allowed| allowed.matches(origin))
+            })
+        })
         .allow_any_method()
         .allow_any_header();
     let json_config = web::JsonConfig::default()

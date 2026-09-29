@@ -64,7 +64,7 @@ Non-Unicode values are rejected without echoing their contents. An empty or whit
 | `RUST_LOG` | `info` | Log filter, such as `debug,actix_server=warn`. |
 | `LOG_FORMAT` | `pretty` | `pretty` for people, `json` for log collectors. |
 | `HTTP_CORS_ENABLED` | `true` | Installs the CORS middleware when `true`; `false` emits no CORS headers. |
-| `HTTP_CORS_ALLOWED_ORIGINS` | empty | Comma-separated HTTP or HTTPS origins allowed browser access. Each entry is normalized to an origin; paths, credentials, queries, fragments and `*` are invalid. |
+| `HTTP_CORS_ALLOWED_ORIGINS` | empty | Comma-separated HTTP or HTTPS origins allowed browser access. A leftmost `*.` wildcard includes the apex and any subdomain depth while preserving the exact scheme and port. Other wildcard positions, paths, credentials, queries and fragments are invalid. |
 | `HTTP_REQUEST_TIMEOUT_SECS` | `30` | Positive whole-request deadline in seconds. |
 | `HTTP_REQUEST_BODY_LIMIT_BYTES` | `1048576` | Positive maximum size for JSON and other buffered request-body extractors. |
 
@@ -146,7 +146,9 @@ The response deliberately has no `detail` field and never exposes SQL, connectio
 Conversion points log safe diagnostic context instead.
 A request that exceeds its whole-request deadline returns `504 Gateway Timeout`.
 
-CORS is enabled by default but starts with an empty origin allowlist, so no cross-origin browser access is allowed until an operator names exact origins.
+CORS is enabled by default but starts with an empty origin allowlist, so no cross-origin browser access is allowed until an operator names an exact or wildcard origin.
+For example, `https://*.example.com` allows `https://example.com`, `https://tenant.example.com` and `https://a.b.example.com`, but not another scheme, port or domain suffix.
+The response echoes the concrete request origin rather than the configured wildcard.
 An allowed origin may use any route method and request header; credentials remain disabled.
 A simple request from another origin is processed without an `Access-Control-Allow-Origin` response header, while a refused preflight receives the normal safe error response.
 Turning CORS off installs no CORS middleware.

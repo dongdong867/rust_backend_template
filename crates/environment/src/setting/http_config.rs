@@ -1,10 +1,12 @@
 use std::time::Duration;
 
+use crate::CorsOrigin;
+
 /// Validated limits and cross-origin policy applied to every HTTP request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpConfig {
     pub cors_enabled: bool,
-    pub cors_allowed_origins: Vec<String>,
+    pub cors_allowed_origins: Vec<CorsOrigin>,
     pub request_timeout: Duration,
     pub request_body_limit: usize,
 }

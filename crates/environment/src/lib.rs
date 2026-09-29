@@ -7,4 +7,4 @@ pub(crate) mod setting;
 
 pub use config::Config;
 pub use config_error::ConfigError;
-pub use setting::{HttpConfig, LogFormat};
+pub use setting::{CorsOrigin, HttpConfig, LogFormat};

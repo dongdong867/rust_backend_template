@@ -2,9 +2,8 @@ use std::env;
 use std::time::Duration;
 
 use tracing_subscriber::EnvFilter;
-use url::Url;
 
-use crate::{ConfigError, HttpConfig, LogFormat};
+use crate::{ConfigError, CorsOrigin, HttpConfig, LogFormat};
 
 /// Validated, immutable settings for one process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,7 +84,7 @@ fn read_http_config(
             lookup,
             "HTTP_CORS_ALLOWED_ORIGINS",
             Vec::new(),
-            "a comma-separated list of HTTP or HTTPS origins without paths, or an empty list",
+            "a comma-separated list of HTTP or HTTPS origins with an optional leftmost *. wildcard, or an empty list",
             parse_cors_allowed_origins,
         )?,
         request_timeout: setting(
@@ -111,28 +110,12 @@ fn read_http_config(
     })
 }
 
-fn parse_cors_allowed_origins(value: &str) -> Option<Vec<String>> {
+fn parse_cors_allowed_origins(value: &str) -> Option<Vec<CorsOrigin>> {
     if value.is_empty() {
         return Some(Vec::new());
     }
 
-    value.split(',').map(parse_cors_origin).collect()
-}
-
-fn parse_cors_origin(value: &str) -> Option<String> {
-    let url = Url::parse(value.trim()).ok()?;
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return None;
-    }
-
-    let origin = url.origin().ascii_serialization();
-    (origin != "null").then_some(origin)
+    value.split(',').map(CorsOrigin::parse).collect()
 }
 
 /// Returns `default` when `name` is unset, the parsed value when it parses, and an error naming
@@ -160,7 +143,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::HttpConfig;
+    use crate::{CorsOrigin, HttpConfig};
 
     fn load(vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
         let vars: HashMap<String, String> = vars
@@ -223,8 +206,8 @@ mod tests {
                 http: HttpConfig {
                     cors_enabled: false,
                     cors_allowed_origins: vec![
-                        "https://app.example.com".to_owned(),
-                        "http://localhost:3000".to_owned(),
+                        CorsOrigin::parse("https://app.example.com").unwrap(),
+                        CorsOrigin::parse("http://localhost:3000").unwrap(),
                     ],
                     request_timeout: Duration::from_secs(15),
                     request_body_limit: 2048,
@@ -289,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_wildcard_cors_origin() {
+    fn rejects_the_allow_any_origin_wildcard() {
         assert_eq!(
             invalid_name(&[("HTTP_CORS_ALLOWED_ORIGINS", "*")]),
             "HTTP_CORS_ALLOWED_ORIGINS"
