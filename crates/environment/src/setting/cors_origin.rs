@@ -47,12 +47,17 @@ impl CorsOrigin {
             return false;
         }
 
-        self.host == origin.host
-            || self.wildcard
-                && origin
-                    .host
-                    .strip_suffix(&self.host)
-                    .is_some_and(|prefix| prefix.ends_with('.'))
+        if self.host == origin.host {
+            return true;
+        }
+        if !self.wildcard {
+            return false;
+        }
+
+        let Some(prefix) = origin.host.strip_suffix(&self.host) else {
+            return false;
+        };
+        prefix.ends_with('.')
     }
 }
 
