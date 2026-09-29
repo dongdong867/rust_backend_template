@@ -15,7 +15,7 @@ Run `make hooks-install` once per clone so each commit checks formatting first.
 
 - The repository root holds the workspace `Cargo.toml`, the service package in `rust-backend-template/`, and every other crate in `crates/`.
 - The service package owns startup and shutdown, logging, dependency composition, route registration, middleware, and the mapping from errors to HTTP status codes. Its library is imported as `rust_backend_template`.
-- `crates/environment` reads configuration once at startup. Only the service package depends on it. A new setting gets a named environment variable, a validated type and tests, and an invalid value stops startup with a message that names the setting. Do not add a general mode switch such as `APP_ENV`.
+- `crates/environment` reads configuration once at startup. Only the service package depends on it. `Config` stays at the crate root; subordinate validated setting types live under `src/setting/`. A new setting gets a named environment variable, a validated type and tests, and an invalid value stops startup with a message that names the setting. Do not add a general mode switch such as `APP_ENV`.
 - Each business feature is one crate under `crates/` with `domain`, `application` and `adapter` layers, and folders by kind inside each layer. [docs/architecture.md](docs/architecture.md) shows the layout.
 - One type per file, named after the type in snake case. A parent module file only declares its modules and re-exports their types.
 - The controller trait in `adapter/port/in` is the only input port. Use cases are concrete services in `application/service`. Outbound dependencies are traits in `application/port/out`, implemented in the adapter layer.
