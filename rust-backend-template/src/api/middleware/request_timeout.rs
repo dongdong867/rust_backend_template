@@ -8,6 +8,7 @@ use environment::HttpConfig;
 
 use crate::api::error::ProblemDetails;
 use crate::api::middleware::request_id::REQUEST_ID_HEADER;
+use crate::api::middleware::security_headers::SecurityHeaders;
 
 /// Stops request processing after the configured whole-request deadline.
 pub async fn request_timeout(
@@ -24,6 +25,7 @@ pub async fn request_timeout(
                 "request timed out"
             );
             let mut response = ProblemDetails::http_response(StatusCode::GATEWAY_TIMEOUT);
+            SecurityHeaders::apply(response.headers_mut());
             if let Some(request_id) = request_id {
                 response
                     .headers_mut()

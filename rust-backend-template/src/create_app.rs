@@ -8,6 +8,7 @@ use environment::HttpConfig;
 use crate::api::error::ProblemDetails;
 use crate::api::middleware::request_id::request_id;
 use crate::api::middleware::request_timeout::request_timeout;
+use crate::api::middleware::security_headers::SecurityHeaders;
 use crate::api::route::health::config_health_routes;
 
 /// Builds the application: every route, wrapped in the middleware every request passes through.
@@ -42,6 +43,7 @@ pub fn create_app(
         .wrap(Condition::new(http_config.cors_enabled, cors))
         .wrap(from_fn(request_timeout))
         .wrap(ErrorHandlers::new().default_handler(ProblemDetails::error_response))
+        .wrap(SecurityHeaders::middleware())
         .wrap(from_fn(request_id))
         .configure(config_health_routes)
 }
