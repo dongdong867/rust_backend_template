@@ -1,0 +1,186 @@
+//! Runs the built binary as a real process, the way a deployment starts it.
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+const BINARY: &str = env!("CARGO_BIN_EXE_rust-backend-template");
+const WAIT: Duration = Duration::from_secs(10);
+
+/// A running service that is killed if a test ends early.
+struct Service {
+    child: Child,
+    logs: Receiver<Value>,
+}
+
+impl Service {
+    fn start() -> Self {
+        let mut child = Command::new(BINARY)
+            .env_clear()
+            .env("PORT", "0")
+            .env("LOG_FORMAT", "json")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, logs) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if let Ok(value) = serde_json::from_str(&line)
+                    && sender.send(value).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self { child, logs }
+    }
+
+    fn wait_for_log(&self, message: &str) -> Value {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let line = self
+                .logs
+                .recv_timeout(remaining)
+                .unwrap_or_else(|_| panic!("no {message:?} log within {WAIT:?}"));
+            if line["message"] == message {
+                return line;
+            }
+        }
+    }
+
+    fn port(&self) -> u16 {
+        let line = self.wait_for_log("listening");
+        let address = line["address"].as_str().unwrap();
+        address.rsplit(':').next().unwrap().parse().unwrap()
+    }
+
+    fn terminate(&self) {
+        let status = Command::new("kill")
+            .args(["-TERM", &self.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the service did not exit within {WAIT:?}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn get(port: u16, path: &str) -> String {
+    get_with_headers(port, path, "")
+}
+
+fn get_with_headers(port: u16, path: &str, headers: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\n{headers}Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn serves_health_then_stops_cleanly_on_sigterm() {
+    let mut service = Service::start();
+    let port = service.port();
+
+    let response = get(port, "/health");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.ends_with(r#"{"status":"ok"}"#), "{response}");
+
+    service.terminate();
+    assert!(service.wait_for_exit().success());
+    service.wait_for_log("stopped");
+}
+
+#[test]
+fn logs_each_request_with_its_id_and_without_the_query() {
+    let service = Service::start();
+    let port = service.port();
+
+    get_with_headers(port, "/health?token=secret", "x-request-id: abc-123\r\n");
+
+    let line = service.wait_for_log("request completed");
+    assert_eq!(line["level"], "INFO");
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["path"], "/health");
+    assert_eq!(line["status"], 200);
+    assert!(line["duration_ms"].is_u64(), "{line}");
+    assert_eq!(line["span"]["request_id"], "abc-123");
+    assert!(!line.to_string().contains("secret"), "{line}");
+}
+
+#[test]
+fn an_invalid_setting_stops_startup_and_names_the_setting() {
+    let output = Command::new(BINARY)
+        .env_clear()
+        .env("PORT", "http")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid PORT"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_unicode_setting_stops_startup_without_leaking_its_value() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut child = Command::new(BINARY)
+        .env_clear()
+        .env("PORT", "0")
+        .env("RUST_LOG", OsString::from_vec(b"secret\xff".to_vec()))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + WAIT;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("a non-Unicode RUST_LOG did not stop startup within {WAIT:?}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("RUST_LOG"), "{stderr}");
+    assert!(!stderr.contains("secret"), "{stderr}");
+}
