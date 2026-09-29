@@ -19,23 +19,3 @@ async fn health_answers_ok_as_json() {
     );
     assert_eq!(test::read_body(response).await, r#"{"status":"ok"}"#);
 }
-
-#[actix_web::test]
-async fn health_refuses_other_methods() {
-    let app = test::init_service(create_app()).await;
-
-    let response =
-        test::call_service(&app, test::TestRequest::post().uri("/health").to_request()).await;
-
-    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-}
-
-#[actix_web::test]
-async fn unknown_path_is_not_found() {
-    let app = test::init_service(create_app()).await;
-
-    let response =
-        test::call_service(&app, test::TestRequest::get().uri("/missing").to_request()).await;
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}

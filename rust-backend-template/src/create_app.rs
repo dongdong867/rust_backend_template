@@ -1,8 +1,9 @@
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
-use actix_web::middleware::from_fn;
+use actix_web::middleware::{ErrorHandlers, from_fn};
 use actix_web::{App, Error};
 
+use crate::api::error::ProblemDetails;
 use crate::api::middleware::request_id::request_id;
 use crate::api::route::health::config_health_routes;
 
@@ -17,6 +18,7 @@ pub fn create_app() -> App<
     >,
 > {
     App::new()
+        .wrap(ErrorHandlers::new().default_handler(ProblemDetails::error_response))
         .wrap(from_fn(request_id))
         .configure(config_health_routes)
 }
