@@ -5,6 +5,7 @@ use actix_web::dev::ServiceResponse;
 use actix_web::http::StatusCode;
 use actix_web::http::header::CONTENT_TYPE;
 use actix_web::test;
+use environment::HttpConfig;
 use rust_backend_template::create_app::create_app;
 use serde_json::{Value, json};
 
@@ -30,7 +31,7 @@ async fn assert_problem<B: MessageBody>(
 
 #[actix_web::test]
 async fn an_unknown_path_uses_problem_details() {
-    let app = test::init_service(create_app()).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
 
     let response =
         test::call_service(&app, test::TestRequest::get().uri("/missing").to_request()).await;
@@ -40,7 +41,7 @@ async fn an_unknown_path_uses_problem_details() {
 
 #[actix_web::test]
 async fn a_wrong_method_uses_problem_details() {
-    let app = test::init_service(create_app()).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
 
     let response =
         test::call_service(&app, test::TestRequest::post().uri("/health").to_request()).await;
