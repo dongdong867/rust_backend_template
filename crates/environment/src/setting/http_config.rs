@@ -15,6 +15,15 @@ impl HttpConfig {
     pub(crate) const DEFAULT_CORS_ENABLED: bool = true;
     pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
     pub(crate) const DEFAULT_REQUEST_BODY_LIMIT: usize = 1_048_576;
+
+    /// Whether CORS is enabled and the concrete origin matches the configured allowlist.
+    pub fn allows_origin(&self, origin: &str) -> bool {
+        self.cors_enabled
+            && self
+                .cors_allowed_origins
+                .iter()
+                .any(|allowed| allowed.matches(origin))
+    }
 }
 
 impl Default for HttpConfig {

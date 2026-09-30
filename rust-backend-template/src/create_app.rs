@@ -1,6 +1,7 @@
 use actix_cors::Cors;
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
+use actix_web::error::JsonPayloadError;
 use actix_web::middleware::{Condition, ErrorHandlers, from_fn};
 use actix_web::{App, Error, web};
 use environment::HttpConfig;
@@ -23,21 +24,29 @@ pub fn create_app(
         InitError = (),
     >,
 > {
-    let allowed_origins = http_config.cors_allowed_origins.clone();
+    let cors_config = http_config.clone();
     let cors = Cors::default()
         .allowed_origin_fn(move |origin, _request| {
-            origin.to_str().ok().is_some_and(|origin| {
-                allowed_origins
-                    .iter()
-                    .any(|allowed| allowed.matches(origin))
-            })
+            origin
+                .to_str()
+                .ok()
+                .is_some_and(|origin| cors_config.allows_origin(origin))
         })
         .allow_any_method()
         .allow_any_header();
     let json_config = web::JsonConfig::default()
         .limit(http_config.request_body_limit)
         .error_handler(|error, _request| {
-            tracing::warn!(reason = %error, "JSON request body rejected");
+            // Deserialization error text can contain submitted values.
+            let reason = match &error {
+                JsonPayloadError::Deserialize(_) => "deserialize",
+                JsonPayloadError::ContentType => "content_type",
+                JsonPayloadError::OverflowKnownLength { .. }
+                | JsonPayloadError::Overflow { .. } => "body_limit",
+                JsonPayloadError::Payload(_) => "payload",
+                _ => "json_body",
+            };
+            tracing::warn!(reason, "JSON request body rejected");
             error.into()
         });
 

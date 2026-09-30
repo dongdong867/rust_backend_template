@@ -1,7 +1,7 @@
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::http::StatusCode;
-use actix_web::http::header::HeaderName;
+use actix_web::http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, HeaderName, HeaderValue, ORIGIN, VARY};
 use actix_web::middleware::Next;
 use actix_web::{Error, error, web};
 use environment::HttpConfig;
@@ -17,6 +17,7 @@ pub async fn request_timeout(
     next: Next<impl MessageBody + 'static>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
     let request_id = request.headers().get(REQUEST_ID_HEADER).cloned();
+    let origin = request.headers().get(ORIGIN).cloned();
     match actix_web::rt::time::timeout(http_config.request_timeout, next.call(request)).await {
         Ok(response) => response,
         Err(_) => {
@@ -26,6 +27,21 @@ pub async fn request_timeout(
             );
             let mut response = ProblemDetails::http_response(StatusCode::GATEWAY_TIMEOUT);
             SecurityHeaders::apply(response.headers_mut());
+            if http_config.cors_enabled {
+                response
+                    .headers_mut()
+                    .insert(VARY, HeaderValue::from_static("Origin"));
+            }
+            if let Some(origin) = origin.filter(|origin| {
+                origin
+                    .to_str()
+                    .ok()
+                    .is_some_and(|origin| http_config.allows_origin(origin))
+            }) {
+                response
+                    .headers_mut()
+                    .insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+            }
             if let Some(request_id) = request_id {
                 response
                     .headers_mut()
