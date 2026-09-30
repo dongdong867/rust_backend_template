@@ -8,6 +8,12 @@ pub enum ConfigError {
         value: String,
     },
 
+    #[error("invalid {name}: expected {expected}")]
+    InvalidSecret {
+        name: &'static str,
+        expected: &'static str,
+    },
+
     #[error("invalid {name}: expected Unicode text")]
     NotUnicode { name: &'static str },
 }

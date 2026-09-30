@@ -11,17 +11,23 @@ rust-backend-template/            the service package, named after the service
     main.rs                       reads configuration, starts logging, runs the server
     lib.rs                        the library that main.rs and the tests import
     api/route/health.rs           GET /health: handler, response and route registration
+    api/route/v1/tasks.rs         task routes and controller error-to-status mapping
     api/middleware/request_id.rs  request IDs and one log line per request
+    container.rs                  builds each feature's dependencies once
+    database.rs                   creates the shared lazy PostgreSQL pool
+    bin/migrate.rs                explicit migration command, never called by the server
     create_app.rs                 the Actix App: middleware and every route
     server.rs                     binds the port, serves the App, stops gracefully
     telemetry.rs                  the log subscriber
   tests/                          in-memory HTTP tests and process tests
 crates/
   environment/                    Config::from_env, ConfigError, LogFormat
+  tasks/                          removable example business feature
   <feature>/                      one crate per business feature
+migrations/                      versioned PostgreSQL schema changes
 ```
 
-Later work adds `container.rs` to build each feature's services, controller and repositories once, `database.rs` for the shared PostgreSQL pool, `api/route/v1/<feature>.rs` for a feature's routes, `swagger/` for API documentation, and `migrations/`.
+Later work adds `swagger/` for API documentation.
 
 ## Module files
 
@@ -67,6 +73,8 @@ Non-Unicode values are rejected without echoing their contents. An empty or whit
 | `HTTP_CORS_ALLOWED_ORIGINS` | empty | Comma-separated HTTP or HTTPS origins allowed browser access. A leftmost `*.` wildcard includes the apex and any subdomain depth while preserving the exact scheme and port. Other wildcard positions, paths, credentials, queries and fragments are invalid. |
 | `HTTP_REQUEST_TIMEOUT_SECS` | `30` | Positive whole-request deadline in seconds. |
 | `HTTP_REQUEST_BODY_LIMIT_BYTES` | `1048576` | Positive maximum size for JSON and other buffered request-body extractors. |
+| `DATABASE_URL` | `postgres://localhost/rust_backend_template` | PostgreSQL URI with a host. This secret setting is redacted in validation errors and configuration debug output. |
+| `DATABASE_MAX_CONNECTIONS` | `10` | Positive maximum pooled connections per service process. Connections open on demand, not at startup. |
 
 The binary reads only its process environment.
 `make run` loads a local `.env` file first; `.example.env` shows the settings.
@@ -78,6 +86,23 @@ The project does not add a TOML configuration source for these flat settings bec
 A named environment variable configures runtime behavior.
 A Cargo feature switches code in or out at compile time.
 There is no general feature-flag system and no `APP_ENV`-style mode.
+
+## PostgreSQL
+
+The service creates one shared SQLx pool before Actix starts its workers.
+The pool has zero minimum connections and connects lazily, so startup and `/health` do not contact PostgreSQL.
+`DATABASE_MAX_CONNECTIONS` limits open database sessions, not simultaneous HTTP requests.
+A query temporarily borrows a pooled connection; a transaction keeps its connection until commit or rollback.
+Further database work waits when all connections are borrowed.
+The process closes the shared pool after the HTTP server stops.
+
+Feature repositories receive this pool and own their queries.
+Queries are runtime-checked: compilation needs neither a live database nor saved `.sqlx` metadata.
+SQLx statement logging is disabled, and conversion points emit categories rather than source errors that might contain SQL or credentials.
+
+Run `make migrate` deliberately against the application's configured database.
+It loads `.env` for local use and runs the committed `migrations/` through the service's migration binary.
+Server startup never runs migrations, either globally or per worker.
 
 ## Feature crates
 
@@ -131,6 +156,31 @@ A feature crate never depends on Actix; its request and response types need only
 Cargo cannot stop `application` from importing SQLx, because the repository in the same crate needs it.
 Reviews check that `domain` and `application` never import SQLx or read environment variables.
 There is no shared crate holding every feature's SQL: a feature receives the shared pool from the service package and owns its own queries.
+
+`make layers-check`, included in `make lint`, rejects Actix dependencies in business feature crates and forbidden source references.
+In `domain` and `application`, it also rejects SQLx and environment-access identifiers, including grouped and aliased imports.
+The lexical check ignores comments and literals but is intentionally conservative: `env` is reserved in these layers.
+It is a guardrail, not a substitute for reviewing inward dependencies.
+
+## Tasks example
+
+The task aggregate owns its validated title, UUID, status and UTC timestamps.
+Titles contain 1–200 Unicode characters and are preserved exactly, including whitespace.
+U+0000 is rejected as an invalid title because PostgreSQL text cannot represent it.
+Create, get and complete services depend on the outbound `TaskRepository` trait.
+The controller translates DTOs and commands; Actix and HTTP status mapping stay in the service package.
+The production controller is provided through `web::Data<dyn TaskController>`; HTTP tests provide the same controller backed by an in-memory repository.
+
+| Route | Success | Failure |
+|---|---|---|
+| `POST /v1/tasks` | `201` with a new open task | `400` for invalid title or JSON |
+| `GET /v1/tasks/{id}` | `200` with the task | `400` for malformed UUID; `404` for absent task |
+| `POST /v1/tasks/{id}/complete` | `200` with the completed task | `400` for malformed UUID; `404` for absent task; `409` when already completed |
+
+All three return a safe `500` for persistence failures.
+Responses contain `id`, `title`, `status`, `created_at` and `completed_at`; timestamps are UTC RFC 3339 and `completed_at` is null while open.
+The migration constrains title length, status and status/completion consistency.
+Completion uses an atomic conditional update so concurrent attempts cannot both succeed.
 
 ## HTTP safety
 
@@ -207,3 +257,17 @@ The process logs `stopped` and exits with status 0 after a clean stop.
 
 Log output is checked in process tests.
 Tracing caches each log call's enabled state for the whole process, so a test-scoped subscriber misses events when other tests run in parallel.
+
+`make test` is the routine feedback loop: domain and service tests, in-memory HTTP tests with fake repositories, process liveness/configuration tests and architecture-check tests.
+It never contacts PostgreSQL; the real repository test is ignored in ordinary Cargo test runs.
+The in-memory repository is available only with the tasks crate's `test-support` feature, enabled by the service's dev dependency.
+
+`make test-db` is the focused real-SQL boundary check after migrations, repository SQL, row mapping, types or concurrency change.
+It requires an explicit `TEST_DATABASE_URL` and an already-running dedicated PostgreSQL server with `CREATEDB` permission.
+The command maps that URL to SQLx's `DATABASE_URL` only for the test subprocess.
+SQLx creates an isolated temporary test database, applies the real migration and exercises create/get/complete, conflict and constraints.
+It never migrates the base database or automatically starts a database server.
+
+`make check` combines lint, fast tests and real database tests for the complete publication candidate.
+Do not add real database tests to the pre-commit hook.
+The later explicitly triggered CI `/test` workflow should provision PostgreSQL and run this full check.

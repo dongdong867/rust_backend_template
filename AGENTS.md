@@ -8,6 +8,12 @@ Read this file before changing code. [docs/architecture.md](docs/architecture.md
 - test: `make test` — healthy: `test result: ok.`
 - lint: `make lint` — healthy: ``Finished `dev` profile [unoptimized + debuginfo] target(s)``
 
+Run `make test` during normal test-driven development; it never contacts PostgreSQL.
+Run `make test-db` after changing SQL, migrations, database types, row mapping or completion concurrency.
+Run `make check` on the complete publication candidate; it includes lint, fast tests and real database tests.
+Database tests require `TEST_DATABASE_URL` pointing to an already-running dedicated test server with permission to create isolated databases.
+Never start PostgreSQL automatically or add database tests to the pre-commit hook.
+
 `make help` lists every target.
 Run `make hooks-install` once per clone so each commit checks formatting first.
 

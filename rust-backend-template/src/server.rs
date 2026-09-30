@@ -2,11 +2,13 @@
 
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
+use std::sync::Arc;
 
 use actix_web::body::MessageBody;
 use actix_web::dev::{Server, ServiceFactory, ServiceRequest, ServiceResponse};
-use actix_web::{App, Error, HttpServer};
+use actix_web::{App, Error, HttpServer, web};
 use environment::HttpConfig;
+use tasks::adapter::port::r#in::TaskController;
 
 use crate::create_app::create_app;
 
@@ -14,14 +16,21 @@ use crate::create_app::create_app;
 pub const SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 /// Binds the configured port and serves the application until the server stops.
-pub async fn run(port: u16, http_config: HttpConfig) -> io::Result<()> {
+pub async fn run(
+    port: u16,
+    http_config: HttpConfig,
+    task_controller: Arc<dyn TaskController>,
+) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
     tracing::info!(
         address = %listener.local_addr()?,
         version = env!("CARGO_PKG_VERSION"),
         "listening"
     );
-    serve(listener, move || create_app(http_config.clone()))?.await
+    serve(listener, move || {
+        create_app(http_config.clone()).app_data(web::Data::from(task_controller.clone()))
+    })?
+    .await
 }
 
 /// Serves the application that `app` builds on `listener`. The server stops gracefully on

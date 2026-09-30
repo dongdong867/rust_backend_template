@@ -3,3 +3,6 @@
 # Local settings. Only the placeholder example is committed.
 *.env
 !.example.env
+
+# Python architecture-check tooling.
+__pycache__/

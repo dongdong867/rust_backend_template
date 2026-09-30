@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tracing_subscriber::EnvFilter;
 
-use crate::{ConfigError, CorsOrigin, HttpConfig, LogFormat};
+use crate::{ConfigError, CorsOrigin, DatabaseConfig, DatabaseUrl, HttpConfig, LogFormat};
 
 /// Validated, immutable settings for one process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +12,7 @@ pub struct Config {
     pub log_filter: String,
     pub log_format: LogFormat,
     pub http: HttpConfig,
+    pub database: DatabaseConfig,
 }
 
 impl Config {
@@ -61,8 +62,32 @@ impl Config {
                 },
             )?,
             http: read_http_config(&lookup)?,
+            database: read_database_config(&lookup)?,
         })
     }
+}
+
+fn read_database_config(
+    lookup: &impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
+) -> Result<DatabaseConfig, ConfigError> {
+    let defaults = DatabaseConfig::default();
+    let url = match lookup("DATABASE_URL")? {
+        None => defaults.url,
+        Some(value) => DatabaseUrl::parse(&value).ok_or(ConfigError::InvalidSecret {
+            name: "DATABASE_URL",
+            expected: "a PostgreSQL URI with a host",
+        })?,
+    };
+    Ok(DatabaseConfig {
+        url,
+        max_connections: setting(
+            lookup,
+            "DATABASE_MAX_CONNECTIONS",
+            defaults.max_connections,
+            "a positive 32-bit connection count",
+            |value| value.parse().ok().filter(|count| *count > 0),
+        )?,
+    })
 }
 
 fn read_http_config(
@@ -171,6 +196,7 @@ mod tests {
                 port: 8080,
                 log_filter: "info".to_owned(),
                 log_format: LogFormat::Pretty,
+                database: DatabaseConfig::default(),
                 http: HttpConfig {
                     cors_enabled: true,
                     cors_allowed_origins: Vec::new(),
@@ -203,6 +229,7 @@ mod tests {
                 port: 3000,
                 log_filter: "debug,actix_server=warn".to_owned(),
                 log_format: LogFormat::Json,
+                database: DatabaseConfig::default(),
                 http: HttpConfig {
                     cors_enabled: false,
                     cors_allowed_origins: vec![
@@ -219,6 +246,116 @@ mod tests {
     #[test]
     fn port_zero_asks_the_system_for_a_free_port() {
         assert_eq!(load(&[("PORT", "0")]).unwrap().port, 0);
+    }
+
+    #[test]
+    fn database_defaults_and_explicit_values() {
+        let default = load(&[]).unwrap();
+        assert_eq!(
+            default.database.url.as_str(),
+            "postgres://localhost/rust_backend_template"
+        );
+        assert_eq!(default.database.max_connections, 10);
+        for uri in [
+            "postgres://user:password@localhost:5432/db?token=secret",
+            "postgresql://[::1]/db",
+            "postgresql://user:p%40ss@db.example/db?application_name=my%20app",
+        ] {
+            let config =
+                load(&[("DATABASE_URL", uri), ("DATABASE_MAX_CONNECTIONS", "42")]).unwrap();
+            assert_eq!(config.database.url.as_str(), uri);
+            assert_eq!(config.database.max_connections, 42);
+            for debug in [
+                format!("{config:?}"),
+                format!("{:?}", config.database),
+                format!("{:?}", config.database.url),
+            ] {
+                assert!(!debug.contains(uri));
+                assert!(!debug.contains("password"));
+                assert!(!debug.contains("secret"));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_database_urls_are_secret_errors() {
+        for uri in [
+            "",
+            "bad-secret",
+            "http://user:secret@localhost/db",
+            "postgres:///db",
+            "postgres:db",
+            "postgres://",
+            "postgres://user:secret@/db",
+            "postgres://localhost:bad/db",
+            "postgres://bad%20host/db",
+            "postgres://localhost:65536/db",
+            " postgres://localhost/db",
+            "\0postgres://localhost/db",
+        ] {
+            let error = load(&[("DATABASE_URL", uri)]).unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::InvalidSecret {
+                    name: "DATABASE_URL",
+                    ..
+                }
+            ));
+            for rendered in [error.to_string(), format!("{error:?}")] {
+                assert!(rendered.contains("DATABASE_URL"));
+                assert!(!rendered.contains("secret"));
+                if !uri.is_empty() {
+                    assert!(!rendered.contains(uri));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn database_connection_limits_are_positive_u32() {
+        for value in ["0", "", "-1", "many", "4294967296"] {
+            assert_eq!(
+                invalid_name(&[("DATABASE_MAX_CONNECTIONS", value)]),
+                "DATABASE_MAX_CONNECTIONS"
+            );
+        }
+        assert_eq!(
+            load(&[("DATABASE_MAX_CONNECTIONS", "4294967295")])
+                .unwrap()
+                .database
+                .max_connections,
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn nonunicode_database_settings_fail_without_the_value() {
+        for setting in ["DATABASE_URL", "DATABASE_MAX_CONNECTIONS"] {
+            let error = Config::from_try_lookup(|name| {
+                if name == setting {
+                    Err(ConfigError::NotUnicode { name })
+                } else {
+                    Ok(None)
+                }
+            })
+            .unwrap_err();
+            assert_eq!(error, ConfigError::NotUnicode { name: setting });
+            assert!(error.to_string().contains(setting));
+        }
+    }
+
+    #[test]
+    fn reads_each_database_setting_once() {
+        use std::cell::RefCell;
+
+        let calls = RefCell::new(HashMap::new());
+        Config::from_lookup(|name| {
+            *calls.borrow_mut().entry(name.to_owned()).or_insert(0) += 1;
+            None
+        })
+        .unwrap();
+        assert_eq!(calls.borrow()["DATABASE_URL"], 1);
+        assert_eq!(calls.borrow()["DATABASE_MAX_CONNECTIONS"], 1);
     }
 
     #[test]

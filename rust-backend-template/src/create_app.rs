@@ -11,6 +11,7 @@ use crate::api::middleware::request_id::request_id;
 use crate::api::middleware::request_timeout::request_timeout;
 use crate::api::middleware::security_headers::SecurityHeaders;
 use crate::api::route::health::config_health_routes;
+use crate::api::route::v1::tasks::config_task_routes;
 
 /// Builds the application: every route, wrapped in the middleware every request passes through.
 pub fn create_app(
@@ -62,4 +63,5 @@ pub fn create_app(
         .wrap(SecurityHeaders::middleware())
         .wrap(from_fn(request_id))
         .configure(config_health_routes)
+        .configure(config_task_routes)
 }
