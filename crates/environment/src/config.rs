@@ -1,8 +1,9 @@
 use std::env;
+use std::time::Duration;
 
 use tracing_subscriber::EnvFilter;
 
-use crate::{ConfigError, LogFormat};
+use crate::{ConfigError, CorsOrigin, HttpConfig, LogFormat};
 
 /// Validated, immutable settings for one process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,6 +11,7 @@ pub struct Config {
     pub port: u16,
     pub log_filter: String,
     pub log_format: LogFormat,
+    pub http: HttpConfig,
 }
 
 impl Config {
@@ -58,8 +60,62 @@ impl Config {
                     _ => None,
                 },
             )?,
+            http: read_http_config(&lookup)?,
         })
     }
+}
+
+fn read_http_config(
+    lookup: &impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
+) -> Result<HttpConfig, ConfigError> {
+    Ok(HttpConfig {
+        cors_enabled: setting(
+            lookup,
+            "HTTP_CORS_ENABLED",
+            HttpConfig::DEFAULT_CORS_ENABLED,
+            "true or false",
+            |value| match value {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            },
+        )?,
+        cors_allowed_origins: setting(
+            lookup,
+            "HTTP_CORS_ALLOWED_ORIGINS",
+            Vec::new(),
+            "a comma-separated list of HTTP or HTTPS origins with an optional leftmost *. wildcard, or an empty list",
+            parse_cors_allowed_origins,
+        )?,
+        request_timeout: setting(
+            lookup,
+            "HTTP_REQUEST_TIMEOUT_SECS",
+            HttpConfig::DEFAULT_REQUEST_TIMEOUT,
+            "a positive number of seconds",
+            |value| {
+                value
+                    .parse()
+                    .ok()
+                    .filter(|seconds| *seconds > 0)
+                    .map(Duration::from_secs)
+            },
+        )?,
+        request_body_limit: setting(
+            lookup,
+            "HTTP_REQUEST_BODY_LIMIT_BYTES",
+            HttpConfig::DEFAULT_REQUEST_BODY_LIMIT,
+            "a positive number of bytes",
+            |value| value.parse().ok().filter(|bytes| *bytes > 0),
+        )?,
+    })
+}
+
+fn parse_cors_allowed_origins(value: &str) -> Option<Vec<CorsOrigin>> {
+    if value.is_empty() {
+        return Some(Vec::new());
+    }
+
+    value.split(',').map(CorsOrigin::parse).collect()
 }
 
 /// Returns `default` when `name` is unset, the parsed value when it parses, and an error naming
@@ -84,8 +140,10 @@ fn setting<T>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
     use super::*;
+    use crate::{CorsOrigin, HttpConfig};
 
     fn load(vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
         let vars: HashMap<String, String> = vars
@@ -113,6 +171,12 @@ mod tests {
                 port: 8080,
                 log_filter: "info".to_owned(),
                 log_format: LogFormat::Pretty,
+                http: HttpConfig {
+                    cors_enabled: true,
+                    cors_allowed_origins: Vec::new(),
+                    request_timeout: Duration::from_secs(30),
+                    request_body_limit: 1_048_576,
+                },
             }
         );
     }
@@ -123,6 +187,13 @@ mod tests {
             ("PORT", "3000"),
             ("RUST_LOG", "debug,actix_server=warn"),
             ("LOG_FORMAT", "json"),
+            ("HTTP_CORS_ENABLED", "false"),
+            (
+                "HTTP_CORS_ALLOWED_ORIGINS",
+                "https://app.example.com, http://localhost:3000/",
+            ),
+            ("HTTP_REQUEST_TIMEOUT_SECS", "15"),
+            ("HTTP_REQUEST_BODY_LIMIT_BYTES", "2048"),
         ])
         .unwrap();
 
@@ -132,6 +203,15 @@ mod tests {
                 port: 3000,
                 log_filter: "debug,actix_server=warn".to_owned(),
                 log_format: LogFormat::Json,
+                http: HttpConfig {
+                    cors_enabled: false,
+                    cors_allowed_origins: vec![
+                        CorsOrigin::parse("https://app.example.com").unwrap(),
+                        CorsOrigin::parse("http://localhost:3000").unwrap(),
+                    ],
+                    request_timeout: Duration::from_secs(15),
+                    request_body_limit: 2048,
+                },
             }
         );
     }
@@ -170,6 +250,92 @@ mod tests {
     fn rejects_an_empty_log_filter_instead_of_silencing_info_logs() {
         assert_eq!(invalid_name(&[("RUST_LOG", "")]), "RUST_LOG");
         assert_eq!(invalid_name(&[("RUST_LOG", "  ")]), "RUST_LOG");
+    }
+
+    #[test]
+    fn an_empty_cors_origin_list_allows_no_origins() {
+        assert!(
+            load(&[("HTTP_CORS_ALLOWED_ORIGINS", "")])
+                .unwrap()
+                .http
+                .cors_allowed_origins
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_cors_enabled_value() {
+        assert_eq!(
+            invalid_name(&[("HTTP_CORS_ENABLED", "yes")]),
+            "HTTP_CORS_ENABLED"
+        );
+    }
+
+    #[test]
+    fn rejects_the_allow_any_origin_wildcard() {
+        assert_eq!(
+            invalid_name(&[("HTTP_CORS_ALLOWED_ORIGINS", "*")]),
+            "HTTP_CORS_ALLOWED_ORIGINS"
+        );
+    }
+
+    #[test]
+    fn rejects_a_cors_origin_with_a_path() {
+        assert_eq!(
+            invalid_name(&[("HTTP_CORS_ALLOWED_ORIGINS", "https://example.com/private")]),
+            "HTTP_CORS_ALLOWED_ORIGINS"
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_http_cors_origin() {
+        assert_eq!(
+            invalid_name(&[("HTTP_CORS_ALLOWED_ORIGINS", "file:///tmp/example")]),
+            "HTTP_CORS_ALLOWED_ORIGINS"
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_origin_between_commas() {
+        assert_eq!(
+            invalid_name(&[(
+                "HTTP_CORS_ALLOWED_ORIGINS",
+                "https://one.example,,https://two.example"
+            )]),
+            "HTTP_CORS_ALLOWED_ORIGINS"
+        );
+    }
+
+    #[test]
+    fn rejects_a_zero_request_timeout() {
+        assert_eq!(
+            invalid_name(&[("HTTP_REQUEST_TIMEOUT_SECS", "0")]),
+            "HTTP_REQUEST_TIMEOUT_SECS"
+        );
+    }
+
+    #[test]
+    fn rejects_a_request_timeout_that_is_not_a_number() {
+        assert_eq!(
+            invalid_name(&[("HTTP_REQUEST_TIMEOUT_SECS", "soon")]),
+            "HTTP_REQUEST_TIMEOUT_SECS"
+        );
+    }
+
+    #[test]
+    fn rejects_a_zero_request_body_limit() {
+        assert_eq!(
+            invalid_name(&[("HTTP_REQUEST_BODY_LIMIT_BYTES", "0")]),
+            "HTTP_REQUEST_BODY_LIMIT_BYTES"
+        );
+    }
+
+    #[test]
+    fn rejects_a_request_body_limit_that_is_not_a_number() {
+        assert_eq!(
+            invalid_name(&[("HTTP_REQUEST_BODY_LIMIT_BYTES", "large")]),
+            "HTTP_REQUEST_BODY_LIMIT_BYTES"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ fn main() -> ExitCode {
     };
     telemetry::init(&config.log_filter, config.log_format);
 
-    match actix_web::rt::System::new().block_on(server::run(config.port)) {
+    match actix_web::rt::System::new().block_on(server::run(config.port, config.http)) {
         Ok(()) => {
             tracing::info!("stopped");
             ExitCode::SUCCESS

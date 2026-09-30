@@ -6,6 +6,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use actix_web::body::MessageBody;
 use actix_web::dev::{Server, ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::{App, Error, HttpServer};
+use environment::HttpConfig;
 
 use crate::create_app::create_app;
 
@@ -13,14 +14,14 @@ use crate::create_app::create_app;
 pub const SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 /// Binds the configured port and serves the application until the server stops.
-pub async fn run(port: u16) -> io::Result<()> {
+pub async fn run(port: u16, http_config: HttpConfig) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
     tracing::info!(
         address = %listener.local_addr()?,
         version = env!("CARGO_PKG_VERSION"),
         "listening"
     );
-    serve(listener, create_app)?.await
+    serve(listener, move || create_app(http_config.clone()))?.await
 }
 
 /// Serves the application that `app` builds on `listener`. The server stops gracefully on
@@ -78,7 +79,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = serve(listener, || {
-            create_app().route("/slow", web::get().to(slow))
+            create_app(HttpConfig::default()).route("/slow", web::get().to(slow))
         })
         .unwrap();
         let handle = server.handle();

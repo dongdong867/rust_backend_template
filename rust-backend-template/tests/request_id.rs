@@ -1,12 +1,13 @@
 //! In-memory HTTP tests of the request ID every response carries.
 
 use actix_web::test;
+use environment::HttpConfig;
 use rust_backend_template::create_app::create_app;
 use uuid::Uuid;
 
 #[actix_web::test]
 async fn response_carries_a_new_request_id() {
-    let app = test::init_service(create_app()).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
 
     let response =
         test::call_service(&app, test::TestRequest::get().uri("/health").to_request()).await;
@@ -22,7 +23,7 @@ async fn response_carries_a_new_request_id() {
 
 #[actix_web::test]
 async fn a_valid_request_id_from_the_caller_is_kept() {
-    let app = test::init_service(create_app()).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
     let request = test::TestRequest::get()
         .uri("/health")
         .insert_header(("x-request-id", "abc-123"))
@@ -35,7 +36,7 @@ async fn a_valid_request_id_from_the_caller_is_kept() {
 
 #[actix_web::test]
 async fn an_invalid_request_id_from_the_caller_is_replaced() {
-    let app = test::init_service(create_app()).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
     let request = test::TestRequest::get()
         .uri("/health")
         .insert_header(("x-request-id", "not valid"))
@@ -54,7 +55,7 @@ async fn an_invalid_request_id_from_the_caller_is_replaced() {
 
 #[actix_web::test]
 async fn unknown_paths_get_a_request_id_too() {
-    let app = test::init_service(create_app()).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
 
     let response =
         test::call_service(&app, test::TestRequest::get().uri("/missing").to_request()).await;

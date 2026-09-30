@@ -56,17 +56,24 @@ An unset setting takes its default.
 A set but invalid setting stops startup with an error that names the setting, the expected form and the value.
 A secret setting must not echo its value in that error.
 Non-Unicode values are rejected without echoing their contents. An empty or whitespace-only `RUST_LOG` is invalid rather than silently lowering the log level.
+`Config` remains the crate's root aggregate. Subordinate validated types, such as `HttpConfig` and `LogFormat`, live under `crates/environment/src/setting/`.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PORT` | `8080` | TCP port on all IPv4 interfaces. `0` asks the system for a free port; the `listening` log line shows which one. |
 | `RUST_LOG` | `info` | Log filter, such as `debug,actix_server=warn`. |
 | `LOG_FORMAT` | `pretty` | `pretty` for people, `json` for log collectors. |
+| `HTTP_CORS_ENABLED` | `true` | Installs the CORS middleware when `true`; `false` emits no CORS headers. |
+| `HTTP_CORS_ALLOWED_ORIGINS` | empty | Comma-separated HTTP or HTTPS origins allowed browser access. A leftmost `*.` wildcard includes the apex and any subdomain depth while preserving the exact scheme and port. Other wildcard positions, paths, credentials, queries and fragments are invalid. |
+| `HTTP_REQUEST_TIMEOUT_SECS` | `30` | Positive whole-request deadline in seconds. |
+| `HTTP_REQUEST_BODY_LIMIT_BYTES` | `1048576` | Positive maximum size for JSON and other buffered request-body extractors. |
 
 The binary reads only its process environment.
 `make run` loads a local `.env` file first; `.example.env` shows the settings.
 `.env` files are ignored by Git, and `.example.env` holds placeholders only.
 Production receives settings and secrets from its deployment environment.
+Safe defaults stay in code, while environment variables carry values that differ between deployments.
+The project does not add a TOML configuration source for these flat settings because doing so would add file discovery and precedence rules without replacing the need for deployment overrides.
 
 A named environment variable configures runtime behavior.
 A Cargo feature switches code in or out at compile time.
@@ -124,6 +131,44 @@ A feature crate never depends on Actix; its request and response types need only
 Cargo cannot stop `application` from importing SQLx, because the repository in the same crate needs it.
 Reviews check that `domain` and `application` never import SQLx or read environment variables.
 There is no shared crate holding every feature's SQL: a feature receives the shared pool from the service package and owns its own queries.
+
+## HTTP safety
+
+Every client error and server error uses an RFC 9457 Problem Details body with `application/problem+json`:
+
+```json
+{"title":"Not Found","status":404}
+```
+
+The service package owns one replaceable mapping for both application and Actix failures.
+Unknown routes, wrong methods, malformed JSON, oversized buffered bodies and timeouts therefore use the same shape.
+The response deliberately has no `detail` field and never exposes SQL, connection strings, secrets or internal error text.
+Conversion points log safe diagnostic context instead.
+A request that exceeds its whole-request deadline returns `504 Gateway Timeout`.
+
+CORS is enabled by default but starts with an empty origin allowlist, so no cross-origin browser access is allowed until an operator names an exact or wildcard origin.
+For example, `https://*.example.com` allows `https://example.com`, `https://tenant.example.com` and `https://a.b.example.com`, but not another scheme, port or domain suffix.
+The response echoes the concrete request origin rather than the configured wildcard.
+An allowed origin may use any route method and request header; credentials remain disabled.
+A simple request from another origin is processed without an `Access-Control-Allow-Origin` response header, while a refused preflight receives the normal safe error response.
+Turning CORS off installs no CORS middleware.
+CORS is a browser permission mechanism, not authentication or authorization.
+
+`HTTP_REQUEST_BODY_LIMIT_BYTES` configures Actix's JSON, bytes and string extractors.
+A route that intentionally streams a raw `web::Payload` must enforce its own explicit limit rather than buffering the stream.
+
+Every normal and error response receives these fixed headers:
+
+| Header | Value | Purpose |
+|---|---|---|
+| `Content-Security-Policy` | `default-src 'none'; base-uri 'none'; frame-ancestors 'none'` | Loads no browser resources by default, forbids injected base URLs and prevents framing. A future HTML route such as Swagger UI must set its own narrower route-specific policy. |
+| `Permissions-Policy` | `camera=(), geolocation=(), microphone=()` | Disables browser capabilities the API does not use. |
+| `Referrer-Policy` | `no-referrer` | Prevents browser URL data from leaking through the `Referer` header. |
+| `X-Content-Type-Options` | `nosniff` | Makes browsers honor the declared content type. |
+| `X-Frame-Options` | `DENY` | Prevents framing in clients that do not enforce CSP's `frame-ancestors`. |
+
+These headers are fixed application policy, not runtime configuration.
+The application does not emit `Strict-Transport-Security`: the HTTPS ingress or reverse proxy that knows the connection is secure owns HSTS, while local development can continue to use HTTP.
 
 ## Logging
 

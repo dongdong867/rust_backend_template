@@ -3,8 +3,8 @@
 
 pub(crate) mod config;
 pub(crate) mod config_error;
-pub(crate) mod log_format;
+pub(crate) mod setting;
 
 pub use config::Config;
 pub use config_error::ConfigError;
-pub use log_format::LogFormat;
+pub use setting::{CorsOrigin, HttpConfig, LogFormat};

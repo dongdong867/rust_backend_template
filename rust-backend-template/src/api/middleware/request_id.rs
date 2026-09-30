@@ -10,7 +10,7 @@ use actix_web::middleware::Next;
 use tracing::Instrument;
 use uuid::Uuid;
 
-const REQUEST_ID_HEADER: &str = "x-request-id";
+pub(crate) const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Attaches a request ID and logs each completed request.
 ///
@@ -18,7 +18,7 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 /// the request's log span and response header. The logged path excludes the query string,
 /// which may carry secrets.
 pub async fn request_id(
-    req: ServiceRequest,
+    mut req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
     let request_id = req
@@ -27,6 +27,12 @@ pub async fn request_id(
         .and_then(|value| value.to_str().ok())
         .filter(|id| is_valid_request_id(id))
         .map_or_else(|| Uuid::new_v4().to_string(), str::to_owned);
+    let request_id_header =
+        HeaderValue::from_str(&request_id).map_err(actix_web::error::ErrorInternalServerError)?;
+    req.headers_mut().insert(
+        HeaderName::from_static(REQUEST_ID_HEADER),
+        request_id_header.clone(),
+    );
     let method = req.method().to_string();
     let path = req.path().to_owned();
     let span = tracing::info_span!("request", request_id = %request_id);
@@ -50,12 +56,10 @@ pub async fn request_id(
     });
 
     let mut response = result?;
-    // A validated ID or a UUID is always a valid header value.
-    if let Ok(value) = HeaderValue::from_str(&request_id) {
-        response
-            .headers_mut()
-            .insert(HeaderName::from_static(REQUEST_ID_HEADER), value);
-    }
+    response.headers_mut().insert(
+        HeaderName::from_static(REQUEST_ID_HEADER),
+        request_id_header,
+    );
     Ok(response)
 }
 
