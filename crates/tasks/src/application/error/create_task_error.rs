@@ -1,7 +1,13 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+use super::TaskRepositoryError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateTaskError {
-    #[error("invalid title")]
     InvalidTitle,
-    #[error("task persistence failed")]
     Persistence,
+}
+
+impl From<TaskRepositoryError> for CreateTaskError {
+    fn from(_: TaskRepositoryError) -> Self {
+        Self::Persistence
+    }
 }

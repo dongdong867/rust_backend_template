@@ -4,7 +4,9 @@ use actix_web::http::StatusCode;
 use actix_web::http::header::CONTENT_TYPE;
 use actix_web::test;
 use environment::HttpConfig;
-use rust_backend_template::create_app::create_app;
+
+mod support;
+use support::create_app;
 
 #[actix_web::test]
 async fn health_answers_ok_as_json() {

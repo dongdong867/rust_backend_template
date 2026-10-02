@@ -1,4 +1,4 @@
 pub mod command;
 pub mod error;
 pub mod port;
-pub mod service;
+pub mod use_case;

@@ -6,8 +6,10 @@ use actix_web::http::StatusCode;
 use actix_web::http::header::CONTENT_TYPE;
 use actix_web::test;
 use environment::HttpConfig;
-use rust_backend_template::create_app::create_app;
 use serde_json::{Value, json};
+
+mod support;
+use support::create_app;
 
 async fn assert_problem<B: MessageBody>(
     response: ServiceResponse<B>,

@@ -7,8 +7,11 @@ use actix_web::http::header::CONTENT_TYPE;
 use actix_web::test as actix_test;
 use actix_web::{HttpResponse, web};
 use environment::{HttpConfig, LogFormat};
-use rust_backend_template::{create_app::create_app, telemetry};
+use rust_backend_template::telemetry;
 use serde_json::{Value, json};
+
+mod support;
+use support::create_app;
 
 const SENSITIVE_VALUE: &str = "SENSITIVE_JSON_TEST_VALUE";
 

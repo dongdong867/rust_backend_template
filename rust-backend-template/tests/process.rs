@@ -25,6 +25,7 @@ impl Service {
             .env("PORT", "0")
             .env("LOG_FORMAT", "json")
             .env("RUST_LOG", "info")
+            .env("DATABASE_URL", "postgres://localhost/process_test")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -152,6 +153,46 @@ fn an_invalid_setting_stops_startup_and_names_the_setting() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("invalid PORT"), "{stderr}");
+}
+
+#[test]
+fn a_missing_database_url_stops_startup_instead_of_selecting_a_local_database() {
+    let mut child = Command::new(BINARY)
+        .env_clear()
+        .env("PORT", "0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("a missing DATABASE_URL did not stop startup");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("DATABASE_URL is required"), "{stderr}");
+}
+
+#[test]
+fn an_invalid_database_url_stops_startup_without_revealing_credentials() {
+    let secret_uri = "postgres://user:DATABASE_SECRET@invalid[host/task_test";
+    let output = Command::new(BINARY)
+        .env_clear()
+        .env("DATABASE_URL", secret_uri)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("DATABASE_URL"), "{stderr}");
+    assert!(!stderr.contains(secret_uri), "{stderr}");
+    assert!(!stderr.contains("DATABASE_SECRET"), "{stderr}");
+    assert!(!stderr.contains("invalid[host"), "{stderr}");
 }
 
 #[cfg(unix)]

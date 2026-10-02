@@ -13,7 +13,7 @@ rust-backend-template/            the service package, named after the service
     api/route/health.rs           GET /health: handler, response and route registration
     api/route/v1/tasks.rs         task routes and controller error-to-status mapping
     api/middleware/request_id.rs  request IDs and one log line per request
-    container.rs                  builds each feature's dependencies once
+    container.rs                  composes provider → repository → use cases → controller once
     database.rs                   creates the shared lazy PostgreSQL pool
     bin/migrate.rs                explicit migration command, never called by the server
     create_app.rs                 the Actix App: middleware and every route
@@ -35,13 +35,13 @@ Each type gets its own file, named after the type in snake case.
 A parent module file only declares its modules and re-exports their types, as in:
 
 ```rust
-// application/service.rs
-pub(crate) mod create_task_service;
+// application/use_case.rs
+pub(crate) mod create_task_use_case;
 
-pub use create_task_service::CreateTaskService;
+pub use create_task_use_case::CreateTaskUseCase;
 ```
 
-Callers import the re-export, such as `application::service::CreateTaskService`.
+Callers import the re-export, such as `application::use_case::CreateTaskUseCase`.
 
 ## The service package
 
@@ -58,7 +58,7 @@ It holds no business rules.
 
 `crates/environment` reads every setting once, before the server starts, and returns an immutable `Config`.
 Only the service package depends on it, so domain and application code never reads the environment.
-An unset setting takes its default.
+An unset optional setting takes its default; `DATABASE_URL` is required.
 A set but invalid setting stops startup with an error that names the setting, the expected form and the value.
 A secret setting must not echo its value in that error.
 Non-Unicode values are rejected without echoing their contents. An empty or whitespace-only `RUST_LOG` is invalid rather than silently lowering the log level.
@@ -73,7 +73,7 @@ Non-Unicode values are rejected without echoing their contents. An empty or whit
 | `HTTP_CORS_ALLOWED_ORIGINS` | empty | Comma-separated HTTP or HTTPS origins allowed browser access. A leftmost `*.` wildcard includes the apex and any subdomain depth while preserving the exact scheme and port. Other wildcard positions, paths, credentials, queries and fragments are invalid. |
 | `HTTP_REQUEST_TIMEOUT_SECS` | `30` | Positive whole-request deadline in seconds. |
 | `HTTP_REQUEST_BODY_LIMIT_BYTES` | `1048576` | Positive maximum size for JSON and other buffered request-body extractors. |
-| `DATABASE_URL` | `postgres://localhost/rust_backend_template` | PostgreSQL URI with a host. This secret setting is redacted in validation errors and configuration debug output. |
+| `DATABASE_URL` | required | Explicit PostgreSQL URI with a host. Missing values stop startup; this secret setting is redacted in validation errors and configuration debug output. |
 | `DATABASE_MAX_CONNECTIONS` | `10` | Positive maximum pooled connections per service process. Connections open on demand, not at startup. |
 
 The binary reads only its process environment.
@@ -95,6 +95,9 @@ The pool has zero minimum connections and connects lazily, so startup and `/heal
 A query temporarily borrows a pooled connection; a transaction keeps its connection until commit or rollback.
 Further database work waits when all connections are borrowed.
 The process closes the shared pool after the HTTP server stops.
+Startup chooses the PostgreSQL storage provider and passes it to `Container`.
+The container composes the shared repository, concrete use cases and controller once.
+The server and application factory receive a shared container, while handlers receive only their specific controller as Actix data.
 
 Feature repositories receive this pool and own their queries.
 Queries are runtime-checked: compilation needs neither a live database nor saved `.sqlx` metadata.
@@ -106,11 +109,11 @@ Server startup never runs migrations, either globally or per worker.
 
 ## Feature crates
 
-A business feature is one crate under `crates/`, with three layers and folders by kind inside each layer:
+A business feature is one crate under `crates/`, with four layers and folders by kind inside each layer:
 
 ```text
 crates/tasks/src/
-  lib.rs                                  pub mod adapter; pub mod application; pub mod domain;
+  lib.rs                                  exports domain, application, adapter and framework
   domain/                                 entities and value types
     task.rs
     task_status.rs
@@ -118,24 +121,36 @@ crates/tasks/src/
     command/create_task_command.rs        input to one use case
     error/create_task_error.rs            what one use case can fail with
     port/out/task_repository.rs           an outbound trait the use cases need
-    service/create_task_service.rs        one concrete use case
+    use_case/create_task_use_case.rs      one concrete use case
   adapter/
     port/in/task_controller.rs            the input port: a trait the route handlers call
     controller/task_controller_impl.rs    request → command → service → response
     dto/create_task_request.rs            HTTP request and response types
     dto/task_response.rs
+    dto/storage/task_storage_record.rs    plain storage DTO, with no SQLx annotations
+    port/out/task_storage_provider.rs     interface implemented by framework providers
     error/task_controller_error.rs        the controller's error
-    repository/postgres_task_repository.rs  implements application/port/out
+    repository/task_repository_impl.rs    one shared, storage-independent repository
+  framework/
+    storage/postgres_task_storage_provider.rs  runtime SQL and database operations
+    storage/postgres_task_row.rs          SQLx row → plain storage DTO
+    storage/in_memory_task_storage_provider.rs  atomic in-memory storage for tests
 ```
 
 Dependencies point inward.
 `domain` depends on nothing else in the crate.
 `application` depends on `domain`.
 `adapter` depends on both.
+`framework` implements interfaces owned by the adapter and converts external data to plain adapter DTOs.
+Production domain, application and adapter code never imports framework implementations.
 
 The controller trait is the only input port.
-Use cases are concrete services, because the tests run them for real and replace only their outbound ports.
+Use cases are concrete `*UseCase` types, because the tests run them for real and replace only their outbound ports.
 Outbound dependencies, such as a repository, are traits in `application/port/out` so tests can replace them.
+One shared adapter repository implements that application port and holds an `Arc<dyn TaskStorageProvider>`.
+It maps domain objects to storage DTOs, validates reconstructed domain objects and translates provider errors.
+The storage-provider port lives in `adapter/port/out`; its implementations live in the feature's framework layer.
+Provider selection happens in the service package, not in the shared repository.
 
 The controller turns a request type into a command, calls the service, and turns the result into a response type.
 The service package's route handler calls the controller through `web::Data<dyn TaskController>` and maps the controller's error to a status code:
@@ -153,23 +168,31 @@ async fn create_task(
 ```
 
 A feature crate never depends on Actix; its request and response types need only serde.
-Cargo cannot stop `application` from importing SQLx, because the repository in the same crate needs it.
-Reviews check that `domain` and `application` never import SQLx or read environment variables.
-There is no shared crate holding every feature's SQL: a feature receives the shared pool from the service package and owns its own queries.
+SQLx belongs only in `framework`; no feature layer reads environment variables.
+Cargo cannot enforce module boundaries inside a feature crate that needs SQLx for its framework.
+`AGENTS.md` and this document define those boundaries; review checks imports and dependency direction.
+There is no custom lexical architecture checker: a partial Rust/Cargo parser adds maintenance and false positives without proving the architecture.
+This deliberately relies on review, not automated enforcement of every layer import.
+Add a focused guard only if real recurring violations justify it.
 
-`make layers-check`, included in `make lint`, rejects Actix dependencies in business feature crates and forbidden source references.
-In `domain` and `application`, it also rejects SQLx and environment-access identifiers, including grouped and aliased imports.
-The lexical check ignores comments and literals but is intentionally conservative: `env` is reserved in these layers.
-It is a guardrail, not a substitute for reviewing inward dependencies.
+Use shallow framework categories by responsibility: `storage/` covers both PostgreSQL and in-memory providers.
+Future `external/`, `messaging/`, `cache/`, `filesystem/` or `time/` categories are added only with real integrations; do not create empty scaffolding.
+For example, Redis used as task storage belongs in `storage/`, while Redis used to accelerate reads belongs in `cache/`.
+
+Domain fields are private when validation, coordinated mutation or stable identity requires it.
+All current task fields meet those conditions; unrestricted DTO fields remain public.
+Domain/application errors are plain enums with `Debug` and needed comparison/clone derives.
+Configuration errors retain safe operator-facing descriptions; HTTP errors have their separate public format.
+Implement context-free error conversions with `From` on the destination type.
 
 ## Tasks example
 
 The task aggregate owns its validated title, UUID, status and UTC timestamps.
 Titles contain 1–200 Unicode characters and are preserved exactly, including whitespace.
 U+0000 is rejected as an invalid title because PostgreSQL text cannot represent it.
-Create, get and complete services depend on the outbound `TaskRepository` trait.
+Create, get and complete use cases depend on the outbound `TaskRepository` trait.
 The controller translates DTOs and commands; Actix and HTTP status mapping stay in the service package.
-The production controller is provided through `web::Data<dyn TaskController>`; HTTP tests provide the same controller backed by an in-memory repository.
+The production controller is provided through `web::Data<dyn TaskController>`; HTTP tests use the same container, controller, use cases and shared repository with an in-memory framework provider.
 
 | Route | Success | Failure |
 |---|---|---|
@@ -181,6 +204,7 @@ All three return a safe `500` for persistence failures.
 Responses contain `id`, `title`, `status`, `created_at` and `completed_at`; timestamps are UTC RFC 3339 and `completed_at` is null while open.
 The migration constrains title length, status and status/completion consistency.
 Completion uses an atomic conditional update so concurrent attempts cannot both succeed.
+The storage-provider port specifies this guarantee; each provider implements it with conditional SQL or a locked in-memory update.
 
 ## HTTP safety
 
@@ -258,15 +282,19 @@ The process logs `stopped` and exits with status 0 after a clean stop.
 Log output is checked in process tests.
 Tracing caches each log call's enabled state for the whole process, so a test-scoped subscriber misses events when other tests run in parallel.
 
-`make test` is the routine feedback loop: domain and service tests, in-memory HTTP tests with fake repositories, process liveness/configuration tests and architecture-check tests.
+`make test` is the routine feedback loop: domain/use-case tests with fake outbound ports, shared-repository conversion tests, in-memory HTTP tests with the real composition, and process liveness/configuration tests.
 It never contacts PostgreSQL; the real repository test is ignored in ordinary Cargo test runs.
-The in-memory repository is available only with the tasks crate's `test-support` feature, enabled by the service's dev dependency.
+The in-memory framework provider is available only with the tasks crate's `test-support` feature, enabled by the service's dev dependency.
+Tests can replace outbound ports without importing concrete framework providers into production application or adapter code.
+Process tests explicitly supply a valid test DATABASE_URL; the lazy pool leaves these tests database-free.
 
 `make test-db` is the focused real-SQL boundary check after migrations, repository SQL, row mapping, types or concurrency change.
 It requires an explicit `TEST_DATABASE_URL` and an already-running dedicated PostgreSQL server with `CREATEDB` permission.
 The command maps that URL to SQLx's `DATABASE_URL` only for the test subprocess.
 SQLx creates an isolated temporary test database, applies the real migration and exercises create/get/complete, conflict and constraints.
 It never migrates the base database or automatically starts a database server.
+Successful tests attempt to drop the isolated database; failed tests may leave it for inspection.
+SQLx retains `_sqlx_test` bookkeeping in the base database, and a cleanup warning does not necessarily fail the test.
 
 `make check` combines lint, fast tests and real database tests for the complete publication candidate.
 Do not add real database tests to the pre-commit hook.

@@ -24,7 +24,7 @@ impl Config {
         })
     }
 
-    /// Reads each setting through `lookup`, applying defaults for unset ones.
+    /// Reads each setting through `lookup`; DATABASE_URL is required, others have defaults.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         Self::from_try_lookup(|name| Ok(lookup(name)))
     }
@@ -70,9 +70,12 @@ impl Config {
 fn read_database_config(
     lookup: &impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
 ) -> Result<DatabaseConfig, ConfigError> {
-    let defaults = DatabaseConfig::default();
     let url = match lookup("DATABASE_URL")? {
-        None => defaults.url,
+        None => {
+            return Err(ConfigError::Missing {
+                name: "DATABASE_URL",
+            });
+        }
         Some(value) => DatabaseUrl::parse(&value).ok_or(ConfigError::InvalidSecret {
             name: "DATABASE_URL",
             expected: "a PostgreSQL URI with a host",
@@ -83,7 +86,7 @@ fn read_database_config(
         max_connections: setting(
             lookup,
             "DATABASE_MAX_CONNECTIONS",
-            defaults.max_connections,
+            DatabaseConfig::DEFAULT_MAX_CONNECTIONS,
             "a positive 32-bit connection count",
             |value| value.parse().ok().filter(|count| *count > 0),
         )?,
@@ -170,11 +173,22 @@ mod tests {
     use super::*;
     use crate::{CorsOrigin, HttpConfig};
 
+    const TEST_DATABASE_URL: &str = "postgres://localhost/environment_test";
+
+    fn test_database_config() -> DatabaseConfig {
+        DatabaseConfig {
+            url: DatabaseUrl::parse(TEST_DATABASE_URL).unwrap(),
+            max_connections: DatabaseConfig::DEFAULT_MAX_CONNECTIONS,
+        }
+    }
+
     fn load(vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
-        let vars: HashMap<String, String> = vars
+        let mut vars: HashMap<String, String> = vars
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect();
+        vars.entry("DATABASE_URL".to_owned())
+            .or_insert_with(|| TEST_DATABASE_URL.to_owned());
         Config::from_lookup(|name| vars.get(name).cloned())
     }
 
@@ -187,7 +201,21 @@ mod tests {
     }
 
     #[test]
-    fn defaults_apply_when_nothing_is_set() {
+    fn database_url_is_required() {
+        let result = Config::from_lookup(|_| None);
+        assert!(result.is_err(), "missing DATABASE_URL must reject startup");
+        let error = result.unwrap_err();
+        assert_eq!(
+            error,
+            ConfigError::Missing {
+                name: "DATABASE_URL"
+            }
+        );
+        assert_eq!(error.to_string(), "DATABASE_URL is required");
+    }
+
+    #[test]
+    fn defaults_apply_with_only_required_database_url() {
         let config = load(&[]).unwrap();
 
         assert_eq!(
@@ -196,7 +224,7 @@ mod tests {
                 port: 8080,
                 log_filter: "info".to_owned(),
                 log_format: LogFormat::Pretty,
-                database: DatabaseConfig::default(),
+                database: test_database_config(),
                 http: HttpConfig {
                     cors_enabled: true,
                     cors_allowed_origins: Vec::new(),
@@ -229,7 +257,7 @@ mod tests {
                 port: 3000,
                 log_filter: "debug,actix_server=warn".to_owned(),
                 log_format: LogFormat::Json,
-                database: DatabaseConfig::default(),
+                database: test_database_config(),
                 http: HttpConfig {
                     cors_enabled: false,
                     cors_allowed_origins: vec![
@@ -249,12 +277,9 @@ mod tests {
     }
 
     #[test]
-    fn database_defaults_and_explicit_values() {
+    fn database_connection_default_and_explicit_values() {
         let default = load(&[]).unwrap();
-        assert_eq!(
-            default.database.url.as_str(),
-            "postgres://localhost/rust_backend_template"
-        );
+        assert_eq!(default.database.url.as_str(), TEST_DATABASE_URL);
         assert_eq!(default.database.max_connections, 10);
         for uri in [
             "postgres://user:password@localhost:5432/db?token=secret",
@@ -334,6 +359,8 @@ mod tests {
             let error = Config::from_try_lookup(|name| {
                 if name == setting {
                     Err(ConfigError::NotUnicode { name })
+                } else if name == "DATABASE_URL" {
+                    Ok(Some(TEST_DATABASE_URL.to_owned()))
                 } else {
                     Ok(None)
                 }
@@ -349,9 +376,9 @@ mod tests {
         use std::cell::RefCell;
 
         let calls = RefCell::new(HashMap::new());
-        Config::from_lookup(|name| {
+        Config::from_try_lookup(|name| {
             *calls.borrow_mut().entry(name.to_owned()).or_insert(0) += 1;
-            None
+            Ok((name == "DATABASE_URL").then(|| TEST_DATABASE_URL.to_owned()))
         })
         .unwrap();
         assert_eq!(calls.borrow()["DATABASE_URL"], 1);

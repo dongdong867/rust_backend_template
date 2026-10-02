@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskRepositoryError {
+pub enum TaskStorageError {
     NotFound,
     AlreadyCompleted,
     Persistence,

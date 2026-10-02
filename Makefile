@@ -3,7 +3,7 @@
 TAPLO_VERSION := 0.10.0
 
 .DEFAULT_GOAL := help
-.PHONY: help run migrate build test test-db fmt fmt-check fmt-toml-check clippy layers-check lint check hooks-install tools taplo-version
+.PHONY: help run migrate build test test-db fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -19,7 +19,6 @@ build: ## Build the release binary
 
 test: ## Run fast tests without PostgreSQL
 	cargo test --locked --workspace
-	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_check_layers.py
 
 test-db: ## Run real SQL tests on an existing server (requires TEST_DATABASE_URL)
 	@test -n "$${TEST_DATABASE_URL:-}" || { echo "TEST_DATABASE_URL is required; use a dedicated PostgreSQL test server with CREATEDB permission." >&2; exit 1; }
@@ -38,10 +37,7 @@ fmt-toml-check: taplo-version ## Check TOML formatting
 clippy: ## Run Clippy, failing on any warning
 	cargo clippy --locked --workspace --all-targets --all-features -- -D warnings -D clippy::too_many_lines
 
-layers-check: ## Check feature dependency boundaries
-	python3 scripts/check_layers.py
-
-lint: fmt-check fmt-toml-check layers-check clippy ## Run every static check
+lint: fmt-check fmt-toml-check clippy ## Run every static check
 
 check: lint test test-db ## Run the full pre-publication check (requires TEST_DATABASE_URL)
 

@@ -1,7 +1,18 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+use super::TaskRepositoryError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GetTaskError {
-    #[error("task not found")]
     NotFound,
-    #[error("task persistence failed")]
     Persistence,
+}
+
+impl From<TaskRepositoryError> for GetTaskError {
+    fn from(error: TaskRepositoryError) -> Self {
+        match error {
+            TaskRepositoryError::NotFound => Self::NotFound,
+            TaskRepositoryError::AlreadyCompleted | TaskRepositoryError::Persistence => {
+                Self::Persistence
+            }
+        }
+    }
 }

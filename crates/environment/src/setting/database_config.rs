@@ -7,12 +7,6 @@ pub struct DatabaseConfig {
     pub max_connections: u32,
 }
 
-impl Default for DatabaseConfig {
-    fn default() -> Self {
-        Self {
-            url: DatabaseUrl::parse("postgres://localhost/rust_backend_template")
-                .expect("the default database URI is valid"),
-            max_connections: 10,
-        }
-    }
+impl DatabaseConfig {
+    pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 }

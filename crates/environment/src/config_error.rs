@@ -1,6 +1,9 @@
-/// A setting that is set but cannot be used. It names the setting so the operator can fix it.
+/// A missing or unusable setting, named so the operator can fix it.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
+    #[error("{name} is required")]
+    Missing { name: &'static str },
+
     #[error("invalid {name}: expected {expected}, got {value:?}")]
     Invalid {
         name: &'static str,

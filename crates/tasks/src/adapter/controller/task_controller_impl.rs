@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -11,23 +9,26 @@ use crate::{
     },
     application::{
         command::{CompleteTaskCommand, CreateTaskCommand, GetTaskCommand},
-        port::out::TaskRepository,
-        service::{CompleteTaskService, CreateTaskService, GetTaskService},
+        use_case::{CompleteTaskUseCase, CreateTaskUseCase, GetTaskUseCase},
     },
 };
 
 pub struct TaskControllerImpl {
-    create: CreateTaskService,
-    get: GetTaskService,
-    complete: CompleteTaskService,
+    create: CreateTaskUseCase,
+    get: GetTaskUseCase,
+    complete: CompleteTaskUseCase,
 }
 
 impl TaskControllerImpl {
-    pub fn new(repository: Arc<dyn TaskRepository>) -> Self {
+    pub fn new(
+        create: CreateTaskUseCase,
+        get: GetTaskUseCase,
+        complete: CompleteTaskUseCase,
+    ) -> Self {
         Self {
-            create: CreateTaskService::new(repository.clone()),
-            get: GetTaskService::new(repository.clone()),
-            complete: CompleteTaskService::new(repository),
+            create,
+            get,
+            complete,
         }
     }
 }
@@ -67,13 +68,26 @@ impl TaskController for TaskControllerImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::repository::InMemoryTaskRepository;
+    use crate::{
+        adapter::repository::TaskRepositoryImpl, application::port::out::TaskRepository,
+        framework::storage::InMemoryTaskStorageProvider,
+    };
+    use std::sync::Arc;
+
+    fn controller(provider: InMemoryTaskStorageProvider) -> TaskControllerImpl {
+        let repository: Arc<dyn TaskRepository> =
+            Arc::new(TaskRepositoryImpl::new(Arc::new(provider)));
+        TaskControllerImpl::new(
+            CreateTaskUseCase::new(repository.clone()),
+            GetTaskUseCase::new(repository.clone()),
+            CompleteTaskUseCase::new(repository),
+        )
+    }
 
     #[tokio::test]
     async fn controller_wires_services_and_maps_responses_and_errors() {
-        let controller: Arc<dyn TaskController> = Arc::new(TaskControllerImpl::new(Arc::new(
-            InMemoryTaskRepository::new(),
-        )));
+        let controller: Arc<dyn TaskController> =
+            Arc::new(controller(InMemoryTaskStorageProvider::new()));
         let task = controller
             .create_task(CreateTaskRequest {
                 title: " task ".into(),
@@ -84,6 +98,7 @@ mod tests {
         assert_eq!(task.status, "open");
         assert!(task.completed_at.is_none());
         assert_eq!(controller.get_task(task.id).await.unwrap(), task);
+
         let completed = controller.complete_task(task.id).await.unwrap();
         assert_eq!(completed.status, "completed");
         assert!(completed.completed_at.is_some());
@@ -101,8 +116,8 @@ mod tests {
                 .await,
             Err(TaskControllerError::InvalidTitle)
         );
-        let failed =
-            TaskControllerImpl::new(Arc::new(InMemoryTaskRepository::with_persistence_failure()));
+
+        let failed = self::controller(InMemoryTaskStorageProvider::with_persistence_failure());
         assert_eq!(
             failed
                 .create_task(CreateTaskRequest {

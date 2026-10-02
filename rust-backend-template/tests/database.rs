@@ -1,23 +1,29 @@
 //! Pool composition is tested without connecting to a PostgreSQL server.
 
-use actix_web::{http::StatusCode, test, web};
-use environment::{Config, DatabaseConfig};
+use std::sync::Arc;
+
+use actix_web::{http::StatusCode, test};
+use environment::Config;
 use rust_backend_template::{container::Container, create_app::create_app, database::create_pool};
+use tasks::framework::storage::PostgresTaskStorageProvider;
 
 #[actix_web::test]
 async fn the_shared_pool_is_lazy_and_health_never_acquires_a_connection() {
-    let container = Container::new(&DatabaseConfig::default()).unwrap();
-    assert_eq!(container.database.size(), 0);
-    let app = test::init_service(
-        create_app(Default::default()).app_data(web::Data::from(container.task_controller)),
-    )
-    .await;
+    let config = Config::from_lookup(|name| {
+        (name == "DATABASE_URL").then(|| "postgres://localhost/pool_test".to_owned())
+    })
+    .unwrap();
+    let database = create_pool(&config.database).unwrap();
+    let provider = Arc::new(PostgresTaskStorageProvider::new(database.clone()));
+    let container = Arc::new(Container::new(provider));
+    assert_eq!(database.size(), 0);
+    let app = test::init_service(create_app(config.http, container)).await;
     let response =
         test::call_service(&app, test::TestRequest::get().uri("/health").to_request()).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(container.database.size(), 0);
-    assert_eq!(container.database.num_idle(), 0);
-    container.database.close().await;
+    assert_eq!(database.size(), 0);
+    assert_eq!(database.num_idle(), 0);
+    database.close().await;
 }
 
 #[actix_web::test]

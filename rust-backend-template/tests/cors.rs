@@ -11,11 +11,15 @@ use actix_web::http::header::{
 };
 use actix_web::{HttpResponse, test, web};
 use environment::{Config, HttpConfig};
-use rust_backend_template::{create_app::create_app, server::serve};
+use rust_backend_template::server::serve;
 use serde_json::{Value, json};
+
+mod support;
+use support::create_app;
 
 fn http_config(cors_enabled: bool, origins: &[&str]) -> HttpConfig {
     Config::from_lookup(|name| match name {
+        "DATABASE_URL" => Some("postgres://localhost/http_test".to_owned()),
         "HTTP_CORS_ENABLED" => Some(cors_enabled.to_string()),
         "HTTP_CORS_ALLOWED_ORIGINS" => Some(origins.join(",")),
         _ => None,

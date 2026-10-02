@@ -4,7 +4,7 @@ A starting point for an HTTP service in Rust with Actix Web.
 
 ## Run it
 
-You need Rust (the pinned version in `rust-toolchain.toml` installs itself), Python 3 for the architecture checks, and the pinned Taplo CLI (`make tools`).
+You need Rust (the pinned version in `rust-toolchain.toml` installs itself) and the pinned Taplo CLI (`make tools`).
 The tasks example also needs an already-running PostgreSQL server; PostgreSQL 18 is the tested version.
 Create the application's database once, then apply its migrations:
 
@@ -18,6 +18,8 @@ curl localhost:8080/health    # {"status":"ok"}
 
 `/health` works without PostgreSQL. Database connections are acquired only when task requests need them.
 The binary reads its process environment; `make run` and `make migrate` load `.env` for local use.
+`DATABASE_URL` must be explicitly supplied; a missing value stops startup instead of selecting a local database.
+`.example.env` supplies a placeholder for local setup, not a runtime default.
 
 ## Tasks example
 
@@ -40,7 +42,7 @@ Errors use safe RFC 9457 problem details, with no internal SQL or connection inf
 ```sh
 make hooks-install   # check formatting before each commit
 make test            # fast unit, service and in-memory HTTP tests; no PostgreSQL
-make lint            # formatting, architecture boundaries and Clippy; no PostgreSQL
+make lint            # Rust/TOML formatting and Clippy; no PostgreSQL
 make help            # every target
 ```
 
@@ -58,7 +60,17 @@ TEST_DATABASE_URL=postgres://localhost/postgres make check
 
 Use a **dedicated test server**, not production. Its role needs `CREATEDB` permission.
 SQLx creates an isolated temporary database and applies the real migrations; tests never migrate the URL's base database.
+Successful tests attempt to drop their isolated database; failed tests may retain it for inspection.
+SQLx keeps `_sqlx_test` bookkeeping in the base database, and cleanup failures are warnings rather than guaranteed test failures.
 No command starts PostgreSQL automatically, and `make test-db` refuses to run without `TEST_DATABASE_URL`.
 The pre-commit hook remains database-free.
+
+## Feature boundaries
+
+Each feature owns its domain, application, adapter and framework layers.
+The shared adapter repository maps domain objects to plain storage DTOs and depends on a storage-provider interface.
+Concrete PostgreSQL and in-memory providers live in that feature's `framework/storage/`; the service crate chooses and injects the provider.
+Application operations are concrete `*UseCase` types.
+`AGENTS.md` and architecture documentation define dependency rules; code review checks them instead of a custom source parser.
 
 [AGENTS.md](AGENTS.md) holds the project rules, and [docs/architecture.md](docs/architecture.md) explains them.

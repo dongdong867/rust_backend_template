@@ -6,21 +6,17 @@ use std::sync::Arc;
 
 use actix_web::body::MessageBody;
 use actix_web::dev::{Server, ServiceFactory, ServiceRequest, ServiceResponse};
-use actix_web::{App, Error, HttpServer, web};
+use actix_web::{App, Error, HttpServer};
 use environment::HttpConfig;
-use tasks::adapter::port::r#in::TaskController;
 
+use crate::container::Container;
 use crate::create_app::create_app;
 
 /// How long a stopping server waits for requests in progress before it closes them.
 pub const SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 /// Binds the configured port and serves the application until the server stops.
-pub async fn run(
-    port: u16,
-    http_config: HttpConfig,
-    task_controller: Arc<dyn TaskController>,
-) -> io::Result<()> {
+pub async fn run(port: u16, http_config: HttpConfig, container: Arc<Container>) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
     tracing::info!(
         address = %listener.local_addr()?,
@@ -28,7 +24,7 @@ pub async fn run(
         "listening"
     );
     serve(listener, move || {
-        create_app(http_config.clone()).app_data(web::Data::from(task_controller.clone()))
+        create_app(http_config.clone(), container.clone())
     })?
     .await
 }
@@ -63,6 +59,7 @@ mod tests {
     use std::time::Duration;
 
     use actix_web::{HttpResponse, web};
+    use tasks::framework::storage::InMemoryTaskStorageProvider;
 
     use super::*;
 
@@ -88,7 +85,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = serve(listener, || {
-            create_app(HttpConfig::default()).route("/slow", web::get().to(slow))
+            let container = Arc::new(Container::new(Arc::new(InMemoryTaskStorageProvider::new())));
+            create_app(HttpConfig::default(), container).route("/slow", web::get().to(slow))
         })
         .unwrap();
         let handle = server.handle();
