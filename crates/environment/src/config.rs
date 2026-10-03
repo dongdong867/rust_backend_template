@@ -36,14 +36,14 @@ impl Config {
             port: setting(
                 &lookup,
                 "PORT",
-                8080,
+                Some(8080),
                 "a port number from 0 to 65535",
                 |value| value.parse().ok(),
             )?,
             log_filter: setting(
                 &lookup,
                 "RUST_LOG",
-                "info".to_owned(),
+                Some("info".to_owned()),
                 "a nonempty tracing filter such as info or debug,actix_server=warn",
                 |value| {
                     (!value.trim().is_empty() && EnvFilter::try_new(value).is_ok())
@@ -53,7 +53,7 @@ impl Config {
             log_format: setting(
                 &lookup,
                 "LOG_FORMAT",
-                LogFormat::Pretty,
+                Some(LogFormat::Pretty),
                 "pretty or json",
                 |value| match value {
                     "pretty" => Some(LogFormat::Pretty),
@@ -70,23 +70,18 @@ impl Config {
 fn read_database_config(
     lookup: &impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
 ) -> Result<DatabaseConfig, ConfigError> {
-    let url = match lookup("DATABASE_URL")? {
-        None => {
-            return Err(ConfigError::Missing {
-                name: "DATABASE_URL",
-            });
-        }
-        Some(value) => DatabaseUrl::parse(&value).ok_or(ConfigError::InvalidSecret {
-            name: "DATABASE_URL",
-            expected: "a PostgreSQL URI with a host",
-        })?,
-    };
     Ok(DatabaseConfig {
-        url,
+        url: secret_setting(
+            lookup,
+            "DATABASE_URL",
+            None,
+            "a PostgreSQL URI with a host",
+            DatabaseUrl::parse,
+        )?,
         max_connections: setting(
             lookup,
             "DATABASE_MAX_CONNECTIONS",
-            DatabaseConfig::DEFAULT_MAX_CONNECTIONS,
+            Some(DatabaseConfig::DEFAULT_MAX_CONNECTIONS),
             "a positive 32-bit connection count",
             |value| value.parse().ok().filter(|count| *count > 0),
         )?,
@@ -100,7 +95,7 @@ fn read_http_config(
         cors_enabled: setting(
             lookup,
             "HTTP_CORS_ENABLED",
-            HttpConfig::DEFAULT_CORS_ENABLED,
+            Some(HttpConfig::DEFAULT_CORS_ENABLED),
             "true or false",
             |value| match value {
                 "true" => Some(true),
@@ -111,14 +106,14 @@ fn read_http_config(
         cors_allowed_origins: setting(
             lookup,
             "HTTP_CORS_ALLOWED_ORIGINS",
-            Vec::new(),
+            Some(Vec::new()),
             "a comma-separated list of HTTP or HTTPS origins with an optional leftmost *. wildcard, or an empty list",
             parse_cors_allowed_origins,
         )?,
         request_timeout: setting(
             lookup,
             "HTTP_REQUEST_TIMEOUT_SECS",
-            HttpConfig::DEFAULT_REQUEST_TIMEOUT,
+            Some(HttpConfig::DEFAULT_REQUEST_TIMEOUT),
             "a positive number of seconds",
             |value| {
                 value
@@ -131,7 +126,7 @@ fn read_http_config(
         request_body_limit: setting(
             lookup,
             "HTTP_REQUEST_BODY_LIMIT_BYTES",
-            HttpConfig::DEFAULT_REQUEST_BODY_LIMIT,
+            Some(HttpConfig::DEFAULT_REQUEST_BODY_LIMIT),
             "a positive number of bytes",
             |value| value.parse().ok().filter(|bytes| *bytes > 0),
         )?,
@@ -146,22 +141,45 @@ fn parse_cors_allowed_origins(value: &str) -> Option<Vec<CorsOrigin>> {
     value.split(',').map(CorsOrigin::parse).collect()
 }
 
-/// Returns `default` when `name` is unset, the parsed value when it parses, and an error naming
-/// the setting otherwise.
+/// Reads a setting with an optional default and public validation diagnostics.
 fn setting<T>(
     lookup: impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
     name: &'static str,
-    default: T,
+    default: Option<T>,
     expected: &'static str,
     parse: impl Fn(&str) -> Option<T>,
 ) -> Result<T, ConfigError> {
+    read_setting(lookup, name, default, parse, |value| ConfigError::Invalid {
+        name,
+        expected,
+        value,
+    })
+}
+
+/// Reads a setting without retaining its value in validation errors.
+fn secret_setting<T>(
+    lookup: impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
+    name: &'static str,
+    default: Option<T>,
+    expected: &'static str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<T, ConfigError> {
+    read_setting(lookup, name, default, parse, |_| {
+        ConfigError::InvalidSecret { name, expected }
+    })
+}
+
+/// A setting without a declared default is required, regardless of its name or type.
+fn read_setting<T>(
+    lookup: impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
+    name: &'static str,
+    default: Option<T>,
+    parse: impl Fn(&str) -> Option<T>,
+    invalid: impl Fn(String) -> ConfigError,
+) -> Result<T, ConfigError> {
     match lookup(name)? {
-        None => Ok(default),
-        Some(value) => parse(&value).ok_or(ConfigError::Invalid {
-            name,
-            expected,
-            value,
-        }),
+        None => default.ok_or(ConfigError::Missing { name }),
+        Some(value) => parse(&value).ok_or_else(|| invalid(value)),
     }
 }
 
@@ -198,6 +216,114 @@ mod tests {
             Err(error) => panic!("expected an invalid-value error, got {error}"),
             Ok(config) => panic!("expected an error, got {config:?}"),
         }
+    }
+
+    #[test]
+    fn settings_without_defaults_are_required_for_any_key() {
+        let result = setting(
+            |_| Ok(None),
+            "REQUIRED_SETTING",
+            None::<u16>,
+            "a number",
+            |value| value.parse::<u16>().ok(),
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::Missing {
+                name: "REQUIRED_SETTING"
+            })
+        ));
+    }
+
+    #[test]
+    fn declared_defaults_are_used_only_when_the_setting_is_absent() {
+        for (value, expected) in [(None, Ok(7)), (Some("11"), Ok(11))] {
+            assert_eq!(
+                setting(
+                    |_| Ok(value.map(str::to_owned)),
+                    "NUMBER_SETTING",
+                    Some(7_u16),
+                    "a number",
+                    |value| value.parse().ok(),
+                ),
+                expected,
+            );
+        }
+        assert_eq!(
+            setting(
+                |_| Ok(Some("bad".to_owned())),
+                "NUMBER_SETTING",
+                Some(7_u16),
+                "a number",
+                |value| value.parse().ok(),
+            ),
+            Err(ConfigError::Invalid {
+                name: "NUMBER_SETTING",
+                expected: "a number",
+                value: "bad".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn required_settings_parse_provided_values_and_propagate_lookup_errors() {
+        assert_eq!(
+            setting(
+                |_| Ok(Some("11".to_owned())),
+                "REQUIRED_SETTING",
+                None::<u16>,
+                "a number",
+                |value| value.parse().ok(),
+            ),
+            Ok(11),
+        );
+        assert_eq!(
+            setting(
+                |_| Err(ConfigError::NotUnicode {
+                    name: "REQUIRED_SETTING"
+                }),
+                "REQUIRED_SETTING",
+                None::<u16>,
+                "a number",
+                |value| value.parse().ok(),
+            ),
+            Err(ConfigError::NotUnicode {
+                name: "REQUIRED_SETTING"
+            }),
+        );
+    }
+
+    #[test]
+    fn secret_settings_share_the_required_rule_without_disclosing_invalid_values() {
+        assert_eq!(
+            secret_setting(
+                |_| Ok(None),
+                "REQUIRED_SECRET",
+                None::<u16>,
+                "a number",
+                |value| value.parse().ok(),
+            ),
+            Err(ConfigError::Missing {
+                name: "REQUIRED_SECRET"
+            }),
+        );
+        let error = secret_setting(
+            |_| Ok(Some("SENSITIVE_TEST_VALUE".to_owned())),
+            "REQUIRED_SECRET",
+            None::<u16>,
+            "a number",
+            |value| value.parse().ok(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSecret {
+                name: "REQUIRED_SECRET",
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains("SENSITIVE_TEST_VALUE"));
+        assert!(!format!("{error:?}").contains("SENSITIVE_TEST_VALUE"));
     }
 
     #[test]

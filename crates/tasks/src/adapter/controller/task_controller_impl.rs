@@ -68,15 +68,11 @@ impl TaskController for TaskControllerImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        adapter::repository::TaskRepositoryImpl, application::port::out::TaskRepository,
-        framework::storage::InMemoryTaskStorageProvider,
-    };
+    use crate::{application::port::out::TaskRepository, test::TestRepository};
     use std::sync::Arc;
 
-    fn controller(provider: InMemoryTaskStorageProvider) -> TaskControllerImpl {
-        let repository: Arc<dyn TaskRepository> =
-            Arc::new(TaskRepositoryImpl::new(Arc::new(provider)));
+    fn controller(repository: TestRepository) -> TaskControllerImpl {
+        let repository: Arc<dyn TaskRepository> = Arc::new(repository);
         TaskControllerImpl::new(
             CreateTaskUseCase::new(repository.clone()),
             GetTaskUseCase::new(repository.clone()),
@@ -85,9 +81,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn controller_wires_services_and_maps_responses_and_errors() {
-        let controller: Arc<dyn TaskController> =
-            Arc::new(controller(InMemoryTaskStorageProvider::new()));
+    async fn controller_wires_use_cases_and_maps_responses_and_errors() {
+        let controller: Arc<dyn TaskController> = Arc::new(controller(TestRepository::new()));
         let task = controller
             .create_task(CreateTaskRequest {
                 title: " task ".into(),
@@ -117,7 +112,7 @@ mod tests {
             Err(TaskControllerError::InvalidTitle)
         );
 
-        let failed = self::controller(InMemoryTaskStorageProvider::with_persistence_failure());
+        let failed = self::controller(TestRepository::with_persistence_failure());
         assert_eq!(
             failed
                 .create_task(CreateTaskRequest {

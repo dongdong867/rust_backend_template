@@ -12,18 +12,22 @@ use tasks::{
 use uuid::Uuid;
 
 struct Provider(Result<TaskStorageRecord, TaskStorageError>);
+
 #[async_trait]
 impl TaskStorageProvider for Provider {
     async fn create(&self, _: TaskStorageRecord) -> Result<TaskStorageRecord, TaskStorageError> {
         self.0.clone()
     }
+
     async fn get(&self, _: Uuid) -> Result<TaskStorageRecord, TaskStorageError> {
         self.0.clone()
     }
+
     async fn complete(&self, _: TaskStorageRecord) -> Result<TaskStorageRecord, TaskStorageError> {
         self.0.clone()
     }
 }
+
 fn record() -> TaskStorageRecord {
     TaskStorageRecord {
         id: Uuid::new_v4(),
@@ -33,6 +37,7 @@ fn record() -> TaskStorageRecord {
         completed_at: None,
     }
 }
+
 #[tokio::test]
 async fn hydrates_actual_output() {
     let candidate = Task::new(" actual persisted title ".into()).unwrap();
@@ -185,6 +190,7 @@ async fn malformed_records_are_opaque() {
         );
     }
 }
+
 #[tokio::test]
 async fn maps_all_errors() {
     for (storage, expected) in [

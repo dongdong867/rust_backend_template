@@ -9,16 +9,19 @@ use uuid::Uuid;
 pub struct PostgresTaskStorageProvider {
     pool: PgPool,
 }
+
 impl PostgresTaskStorageProvider {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
     fn persistence_error(_: sqlx::Error) -> TaskStorageError {
         // Never format or retain SQLx errors, SQL, or credentials.
         tracing::error!("task persistence failed");
         TaskStorageError::Persistence
     }
 }
+
 #[async_trait]
 impl TaskStorageProvider for PostgresTaskStorageProvider {
     async fn create(
@@ -41,6 +44,7 @@ impl TaskStorageProvider for PostgresTaskStorageProvider {
         .map(Into::into)
         .map_err(Self::persistence_error)
     }
+
     async fn get(&self, id: Uuid) -> Result<TaskStorageRecord, TaskStorageError> {
         sqlx::query_as::<_, PostgresTaskRow>(
             "SELECT id, title, status, created_at, completed_at FROM tasks WHERE id = $1",
@@ -52,6 +56,7 @@ impl TaskStorageProvider for PostgresTaskStorageProvider {
         .map(Into::into)
         .ok_or(TaskStorageError::NotFound)
     }
+
     async fn complete(
         &self,
         record: TaskStorageRecord,

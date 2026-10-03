@@ -6,30 +6,34 @@ use async_trait::async_trait;
 use std::{collections::HashMap, sync::Mutex};
 use uuid::Uuid;
 
-/// Application tests replace the outbound port, without adapter/framework wiring.
+/// Replaces the application repository port in unit tests.
 #[derive(Default)]
-pub(super) struct TestRepository {
+pub(crate) struct TestRepository {
     tasks: Mutex<HashMap<Uuid, Task>>,
     fail: bool,
     error: Option<TaskRepositoryError>,
     complete_error: Option<TaskRepositoryError>,
 }
+
 impl TestRepository {
     pub fn new() -> Self {
         Self::default()
     }
+
     pub fn with_persistence_failure() -> Self {
         Self {
             fail: true,
             ..Self::default()
         }
     }
+
     pub fn with_error(error: TaskRepositoryError) -> Self {
         Self {
             error: Some(error),
             ..Self::default()
         }
     }
+
     pub fn with_complete_error(error: TaskRepositoryError) -> Self {
         Self {
             complete_error: Some(error),
@@ -37,6 +41,7 @@ impl TestRepository {
         }
     }
 }
+
 #[async_trait]
 impl TaskRepository for TestRepository {
     async fn create(&self, task: Task) -> Result<Task, TaskRepositoryError> {
@@ -49,6 +54,7 @@ impl TaskRepository for TestRepository {
         self.tasks.lock().unwrap().insert(task.id(), task.clone());
         Ok(task)
     }
+
     async fn get(&self, id: Uuid) -> Result<Task, TaskRepositoryError> {
         if let Some(error) = self.error {
             return Err(error);
@@ -63,6 +69,7 @@ impl TaskRepository for TestRepository {
             .cloned()
             .ok_or(TaskRepositoryError::NotFound)
     }
+
     async fn complete(&self, task: Task) -> Result<Task, TaskRepositoryError> {
         if let Some(error) = self.complete_error.or(self.error) {
             return Err(error);

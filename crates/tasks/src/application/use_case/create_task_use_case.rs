@@ -23,7 +23,7 @@ impl CreateTaskUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::use_case::test_repository::TestRepository;
+    use crate::test::TestRepository;
 
     #[tokio::test]
     async fn every_outbound_error_is_persistence() {

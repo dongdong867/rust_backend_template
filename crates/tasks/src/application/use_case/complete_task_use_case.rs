@@ -33,7 +33,7 @@ impl CompleteTaskUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{application::use_case::test_repository::TestRepository, domain::TaskStatus};
+    use crate::{domain::TaskStatus, test::TestRepository};
     use uuid::Uuid;
 
     #[tokio::test]

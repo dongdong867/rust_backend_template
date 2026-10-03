@@ -10,16 +10,19 @@ pub struct InMemoryTaskStorageProvider {
     tasks: Mutex<HashMap<Uuid, TaskStorageRecord>>,
     persistence_failure: bool,
 }
+
 impl InMemoryTaskStorageProvider {
     pub fn new() -> Self {
         Self::default()
     }
+
     pub fn with_persistence_failure() -> Self {
         Self {
             persistence_failure: true,
             ..Self::default()
         }
     }
+
     fn tasks(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, HashMap<Uuid, TaskStorageRecord>>, TaskStorageError> {
@@ -29,6 +32,7 @@ impl InMemoryTaskStorageProvider {
         self.tasks.lock().map_err(|_| TaskStorageError::Persistence)
     }
 }
+
 fn valid(record: &TaskStorageRecord) -> bool {
     !record.title.contains('\0')
         && (1..=200).contains(&record.title.chars().count())
@@ -38,6 +42,7 @@ fn valid(record: &TaskStorageRecord) -> bool {
             _ => false,
         }
 }
+
 #[async_trait]
 impl TaskStorageProvider for InMemoryTaskStorageProvider {
     async fn create(
@@ -51,12 +56,14 @@ impl TaskStorageProvider for InMemoryTaskStorageProvider {
         tasks.insert(record.id, record.clone());
         Ok(record)
     }
+
     async fn get(&self, id: Uuid) -> Result<TaskStorageRecord, TaskStorageError> {
         self.tasks()?
             .get(&id)
             .cloned()
             .ok_or(TaskStorageError::NotFound)
     }
+
     async fn complete(
         &self,
         record: TaskStorageRecord,

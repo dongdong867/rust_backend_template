@@ -59,6 +59,8 @@ It holds no business rules.
 `crates/environment` reads every setting once, before the server starts, and returns an immutable `Config`.
 Only the service package depends on it, so domain and application code never reads the environment.
 An unset optional setting takes its default; `DATABASE_URL` is required.
+Setting declarations use `None` for no default (required) and `Some(value)` for a fallback.
+All settings use the same reader for missing/default behavior; secret settings differ only in error redaction, not requiredness.
 A set but invalid setting stops startup with an error that names the setting, the expected form and the value.
 A secret setting must not echo its value in that error.
 Non-Unicode values are rejected without echoing their contents. An empty or whitespace-only `RUST_LOG` is invalid rather than silently lowering the log level.
@@ -95,8 +97,9 @@ The pool has zero minimum connections and connects lazily, so startup and `/heal
 A query temporarily borrows a pooled connection; a transaction keeps its connection until commit or rollback.
 Further database work waits when all connections are borrowed.
 The process closes the shared pool after the HTTP server stops.
-Startup chooses the PostgreSQL storage provider and passes it to `Container`.
-The container composes the shared repository, concrete use cases and controller once.
+`Container::from_config` creates the pool, selects the PostgreSQL storage provider and composes the shared repository, concrete use cases and controller once.
+The container owns the pool and closes it through `shutdown` after the server stops.
+`Container::new` supports explicitly injected providers for tests; their external resources remain caller-owned.
 The server and application factory receive a shared container, while handlers receive only their specific controller as Actix data.
 
 Feature repositories receive this pool and own their queries.
@@ -142,7 +145,9 @@ Dependencies point inward.
 `application` depends on `domain`.
 `adapter` depends on both.
 `framework` implements interfaces owned by the adapter and converts external data to plain adapter DTOs.
-Production domain, application and adapter code never imports framework implementations.
+Domain, application and adapter code never imports framework implementations, including their unit tests.
+Reusable unit-test port doubles live under `crates/tasks/src/test/` and compile only with `cfg(test)`.
+Public-interface integration tests under `tests/` may compose real framework providers.
 
 The controller trait is the only input port.
 Use cases are concrete `*UseCase` types, because the tests run them for real and replace only their outbound ports.
@@ -184,6 +189,8 @@ All current task fields meet those conditions; unrestricted DTO fields remain pu
 Domain/application errors are plain enums with `Debug` and needed comparison/clone derives.
 Configuration errors retain safe operator-facing descriptions; HTTP errors have their separate public format.
 Implement context-free error conversions with `From` on the destination type.
+Cross-layer conversions stay in the outer involved layer so their placement does not reverse dependencies.
+Task/storage-record conversions live with the adapter storage DTO; storage/application error conversion lives with the adapter storage error, not the inner application error.
 
 ## Tasks example
 
