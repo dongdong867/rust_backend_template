@@ -15,7 +15,7 @@ fn main() -> ExitCode {
     telemetry::init(&config.log_filter, config.log_format);
 
     let result = actix_web::rt::System::new().block_on(async {
-        let container = Arc::new(Container::from_config(&config.database)?);
+        let container = Arc::new(Container::new(&config.database)?);
         let result = server::run(config.port, config.http, container.clone()).await;
         container.shutdown().await;
         result

@@ -62,6 +62,7 @@ mod tests {
     use tasks::framework::storage::InMemoryTaskStorageProvider;
 
     use super::*;
+    use crate::providers::Providers;
 
     async fn slow() -> HttpResponse {
         actix_web::rt::time::sleep(Duration::from_millis(300)).await;
@@ -85,7 +86,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = serve(listener, || {
-            let container = Arc::new(Container::new(Arc::new(InMemoryTaskStorageProvider::new())));
+            let container = Arc::new(Container::with_providers(Providers {
+                task_storage: Arc::new(InMemoryTaskStorageProvider::new()),
+            }));
             create_app(HttpConfig::default(), container).route("/slow", web::get().to(slow))
         })
         .unwrap();

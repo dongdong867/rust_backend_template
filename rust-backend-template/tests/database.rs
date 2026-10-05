@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use actix_web::{http::StatusCode, test};
 use environment::Config;
-use rust_backend_template::{container::Container, create_app::create_app, database::create_pool};
+use rust_backend_template::{
+    container::Container, create_app::create_app, database::create_pool, providers::Providers,
+};
 use tasks::framework::storage::PostgresTaskStorageProvider;
 
 #[actix_web::test]
@@ -15,7 +17,9 @@ async fn the_shared_pool_is_lazy_and_health_never_acquires_a_connection() {
     .unwrap();
     let database = create_pool(&config.database).unwrap();
     let provider = Arc::new(PostgresTaskStorageProvider::new(database.clone()));
-    let container = Arc::new(Container::new(provider));
+    let container = Arc::new(Container::with_providers(Providers {
+        task_storage: provider,
+    }));
     assert_eq!(database.size(), 0);
     let app = test::init_service(create_app(config.http, container)).await;
     let response =

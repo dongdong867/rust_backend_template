@@ -97,9 +97,13 @@ The pool has zero minimum connections and connects lazily, so startup and `/heal
 A query temporarily borrows a pooled connection; a transaction keeps its connection until commit or rollback.
 Further database work waits when all connections are borrowed.
 The process closes the shared pool after the HTTP server stops.
-`Container::from_config` creates the pool, selects the PostgreSQL storage provider and composes the shared repository, concrete use cases and controller once.
+`Container::new` creates the pool and selects the PostgreSQL storage provider from validated configuration.
+It delegates to `Container::with_providers`, the shared repository → use cases → controller assembly path.
 The container owns the pool and closes it through `shutdown` after the server stops.
-`Container::new` supports explicitly injected providers for tests; their external resources remain caller-owned.
+`Providers` is a typed bundle with one selected implementation per required port, not a list of every available backend.
+`Container::with_providers` supports explicitly injected providers; their external resources remain caller-owned.
+The existing `tests/support/create_app.rs` factory chooses in-memory providers and calls the shared assembly path.
+There is no additional `test_container()` wrapper or duplicated test graph.
 The server and application factory receive a shared container, while handlers receive only their specific controller as Actix data.
 
 Feature repositories receive this pool and own their queries.

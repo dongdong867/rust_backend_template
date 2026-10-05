@@ -8,14 +8,15 @@ use actix_web::http::header::CONTENT_TYPE;
 use actix_web::{http::StatusCode, test};
 use chrono::DateTime;
 use environment::HttpConfig;
-use rust_backend_template::{container::Container, create_app::create_app};
+use rust_backend_template::{
+    container::Container, create_app::create_app as create_app_with_container, providers::Providers,
+};
 use serde_json::{Value, json};
 use tasks::framework::storage::InMemoryTaskStorageProvider;
 use uuid::Uuid;
 
-fn container() -> Arc<Container> {
-    Arc::new(Container::new(Arc::new(InMemoryTaskStorageProvider::new())))
-}
+mod support;
+use support::create_app;
 
 async fn assert_problem<B: MessageBody>(response: ServiceResponse<B>, status: StatusCode) {
     assert_eq!(response.status(), status);
@@ -33,7 +34,7 @@ async fn assert_problem<B: MessageBody>(response: ServiceResponse<B>, status: St
 
 #[actix_web::test]
 async fn creates_a_task() {
-    let app = test::init_service(create_app(HttpConfig::default(), container())).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
     let response = test::call_service(
         &app,
         test::TestRequest::post()
@@ -54,7 +55,7 @@ async fn creates_a_task() {
 
 #[actix_web::test]
 async fn retrieves_and_completes_the_created_task_without_changing_its_identity() {
-    let app = test::init_service(create_app(HttpConfig::default(), container())).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
     let created: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
@@ -101,7 +102,7 @@ async fn retrieves_and_completes_the_created_task_without_changing_its_identity(
 
 #[actix_web::test]
 async fn title_validation_counts_characters_and_preserves_whitespace() {
-    let app = test::init_service(create_app(HttpConfig::default(), container())).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
     for title in ["a".to_owned(), " ".to_owned(), "界".repeat(200)] {
         let response = test::call_service(
             &app,
@@ -130,7 +131,7 @@ async fn title_validation_counts_characters_and_preserves_whitespace() {
 
 #[actix_web::test]
 async fn a_missing_task_is_not_found_for_both_operations() {
-    let app = test::init_service(create_app(HttpConfig::default(), container())).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
     let path = format!("/v1/tasks/{}", Uuid::nil());
     for request in [
         test::TestRequest::get().uri(&path).to_request(),
@@ -148,7 +149,7 @@ async fn a_missing_task_is_not_found_for_both_operations() {
 
 #[actix_web::test]
 async fn malformed_task_ids_are_bad_requests() {
-    let app = test::init_service(create_app(HttpConfig::default(), container())).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
     for request in [
         test::TestRequest::get()
             .uri("/v1/tasks/not-a-uuid")
@@ -167,7 +168,7 @@ async fn malformed_task_ids_are_bad_requests() {
 
 #[actix_web::test]
 async fn malformed_or_missing_titles_use_the_same_safe_error_contract() {
-    let app = test::init_service(create_app(HttpConfig::default(), container())).await;
+    let app = test::init_service(create_app(HttpConfig::default())).await;
     for body in [r#"{"title":42}"#, "{}", "{secret input"] {
         let response = test::call_service(
             &app,
@@ -184,10 +185,10 @@ async fn malformed_or_missing_titles_use_the_same_safe_error_contract() {
 
 #[actix_web::test]
 async fn persistence_failures_are_safe_internal_errors_on_every_endpoint() {
-    let failed = Arc::new(Container::new(Arc::new(
-        InMemoryTaskStorageProvider::with_persistence_failure(),
-    )));
-    let app = test::init_service(create_app(HttpConfig::default(), failed)).await;
+    let failed = Arc::new(Container::with_providers(Providers {
+        task_storage: Arc::new(InMemoryTaskStorageProvider::with_persistence_failure()),
+    }));
+    let app = test::init_service(create_app_with_container(HttpConfig::default(), failed)).await;
     let path = format!("/v1/tasks/{}", Uuid::nil());
     for request in [
         test::TestRequest::post()
