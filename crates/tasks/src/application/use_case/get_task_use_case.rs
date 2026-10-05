@@ -22,7 +22,7 @@ impl GetTaskUseCase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test::TestRepository;
+    use crate::test::{MockTaskRepository, RepositoryExpectation};
     use uuid::Uuid;
 
     #[tokio::test]
@@ -36,22 +36,25 @@ mod tests {
             ),
             (TaskRepositoryError::Persistence, GetTaskError::Persistence),
         ] {
-            let service = GetTaskUseCase::new(Arc::new(TestRepository::with_error(error)));
-            assert_eq!(
-                service.execute(GetTaskCommand { id: Uuid::new_v4() }).await,
-                Err(expected)
-            );
+            let id = Uuid::new_v4();
+            let repository = Arc::new(MockTaskRepository::new([RepositoryExpectation::Get(
+                id,
+                Err(error),
+            )]));
+            let service = GetTaskUseCase::new(repository.clone());
+            assert_eq!(service.execute(GetTaskCommand { id }).await, Err(expected));
+            repository.verify();
         }
     }
 
     #[tokio::test]
-    async fn get_returns_saved_task_and_not_found() {
-        let repository = Arc::new(TestRepository::new());
-        let task = repository
-            .create(Task::new("task".into()).unwrap())
-            .await
-            .unwrap();
-        let service = GetTaskUseCase::new(repository);
+    async fn get_returns_configured_task_for_requested_id() {
+        let task = Task::new("task".into()).unwrap();
+        let repository = Arc::new(MockTaskRepository::new([RepositoryExpectation::Get(
+            task.id(),
+            Ok(task.clone()),
+        )]));
+        let service = GetTaskUseCase::new(repository.clone());
         assert_eq!(
             service
                 .execute(GetTaskCommand { id: task.id() })
@@ -59,18 +62,6 @@ mod tests {
                 .unwrap(),
             task
         );
-        assert_eq!(
-            service.execute(GetTaskCommand { id: Uuid::new_v4() }).await,
-            Err(GetTaskError::NotFound)
-        );
-    }
-
-    #[tokio::test]
-    async fn get_hides_repository_failure() {
-        let service = GetTaskUseCase::new(Arc::new(TestRepository::with_persistence_failure()));
-        assert_eq!(
-            service.execute(GetTaskCommand { id: Uuid::new_v4() }).await,
-            Err(GetTaskError::Persistence)
-        );
+        repository.verify();
     }
 }
