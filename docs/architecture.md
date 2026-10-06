@@ -109,6 +109,14 @@ The server and application factory receive a shared container, while handlers re
 Feature repositories receive this pool and own their queries.
 Queries are runtime-checked: compilation needs neither a live database nor saved `.sqlx` metadata.
 SQLx statement logging is disabled, and conversion points emit categories rather than source errors that might contain SQL or credentials.
+The validated database URI permits only SQLx PostgreSQL 0.9.0's recognized decoded parameter names and well-formed bracket options.
+Unknown names fail with a redacted setting error before SQLx's parser can log their keys or values.
+Keep that parameter list aligned when updating the PostgreSQL driver.
+
+The workspace selects SQLx's rustls/ring backend with platform trust roots.
+For authenticated encryption use `sslmode=verify-full` and a matching server certificate hostname; `sslrootcert` can supply a private deployment's public CA certificate.
+The default `sslmode=prefer` retains SQLx's fallback behavior for local development and does not require encryption.
+TLS support does not add a startup database query or turn `/health` into readiness.
 
 Run `make migrate` deliberately against the application's configured database.
 It loads `.env` for local use and runs the committed `migrations/` through the service's migration binary.
@@ -298,6 +306,8 @@ It never contacts PostgreSQL; the real repository test is ignored in ordinary Ca
 The in-memory framework provider is available only with the tasks crate's `test-support` feature, enabled by the service's dev dependency.
 Tests can replace outbound ports without importing concrete framework providers into production application or adapter code.
 Process tests explicitly supply a valid test DATABASE_URL; the lazy pool leaves these tests database-free.
+The production TLS regression uses a bounded local TLS wire peer, checks encrypted PostgreSQL startup with `verify-full`, and asserts certificate rejection with an untrusted CA.
+It runs no PostgreSQL process, implements no authentication or SQL, generates private test keys only in memory, and removes its temporary public certificate file.
 
 `make test-db` is the focused real-SQL boundary check after migrations, repository SQL, row mapping, types or concurrency change.
 It requires an explicit `TEST_DATABASE_URL` and an already-running dedicated PostgreSQL server with `CREATEDB` permission.

@@ -225,3 +225,51 @@ fn a_non_unicode_setting_stops_startup_without_leaking_its_value() {
     assert!(stderr.contains("RUST_LOG"), "{stderr}");
     assert!(!stderr.contains("secret"), "{stderr}");
 }
+
+#[test]
+fn unsupported_database_parameters_stop_startup_without_logging_keys_or_values() {
+    for query in [
+        "unknown_private_parameter=PARAMETER_SECRET",
+        "%75nknown_private_parameter=ENCODED%5FSECRET",
+    ] {
+        let uri = format!("postgres://user:pass@localhost/process_test?{query}");
+        let mut child = Command::new(BINARY)
+            .env_clear()
+            .env("PORT", "0")
+            .env("LOG_FORMAT", "json")
+            .env("RUST_LOG", "info")
+            .env("DATABASE_URL", &uri)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut timed_out = false;
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                timed_out = true;
+                child.kill().unwrap();
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        for bytes in [&output.stdout, &output.stderr] {
+            let text = String::from_utf8_lossy(bytes);
+            for private in [
+                uri.as_str(),
+                query,
+                "unknown_private_parameter",
+                "%75nknown_private_parameter",
+                "PARAMETER_SECRET",
+                "ENCODED%5FSECRET",
+                "ENCODED_SECRET",
+            ] {
+                assert!(!text.contains(private), "startup leaked {private}: {text}");
+            }
+        }
+        assert!(!timed_out, "unsupported DATABASE_URL did not stop startup");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("DATABASE_URL"));
+    }
+}

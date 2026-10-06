@@ -75,7 +75,7 @@ fn read_database_config(
             lookup,
             "DATABASE_URL",
             None,
-            "a PostgreSQL URI with a host",
+            "a PostgreSQL URI with a host and supported connection parameters",
             DatabaseUrl::parse,
         )?,
         max_connections: setting(
@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(default.database.url.as_str(), TEST_DATABASE_URL);
         assert_eq!(default.database.max_connections, 10);
         for uri in [
-            "postgres://user:password@localhost:5432/db?token=secret",
+            "postgres://user:password@localhost:5432/db?application_name=secret",
             "postgresql://[::1]/db",
             "postgresql://user:p%40ss@db.example/db?application_name=my%20app",
         ] {
@@ -443,6 +443,8 @@ mod tests {
             "postgres://localhost:65536/db",
             " postgres://localhost/db",
             "\0postgres://localhost/db",
+            "postgres://user:secret@localhost/db?token=secret",
+            "postgres://user:secret@localhost/db?%74oken=secret",
         ] {
             let error = load(&[("DATABASE_URL", uri)]).unwrap_err();
             assert!(matches!(
@@ -455,6 +457,8 @@ mod tests {
             for rendered in [error.to_string(), format!("{error:?}")] {
                 assert!(rendered.contains("DATABASE_URL"));
                 assert!(!rendered.contains("secret"));
+                assert!(!rendered.contains("token"));
+                assert!(!rendered.contains("%74oken"));
                 if !uri.is_empty() {
                     assert!(!rendered.contains(uri));
                 }

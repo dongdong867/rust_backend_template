@@ -21,6 +21,16 @@ The binary reads its process environment; `make run` and `make migrate` load `.e
 `DATABASE_URL` must be explicitly supplied; a missing value stops startup instead of selecting a local database.
 `.example.env` supplies a placeholder for local setup, not a runtime default.
 
+### Database transport and connection options
+
+The PostgreSQL client includes rustls with platform trust roots.
+For deployments requiring authenticated encryption, set `sslmode=verify-full` in `DATABASE_URL` and use the database server's certificate hostname.
+If its CA is not in the platform trust store, also supply `sslrootcert` pointing to the trusted public CA certificate.
+SQLx's default `sslmode=prefer` still permits plaintext fallback, which keeps local PostgreSQL setups usable; enabling TLS capability does not make that mode require encryption.
+Unknown or malformed connection parameter names fail startup with a redacted `DATABASE_URL` error before SQLx parses them.
+When putting a URL with `&` query separators in a shell-loaded `.env`, quote the complete value.
+Supply real credentials through the deployment environment or an ignored local file, never committed examples.
+
 ## Tasks example
 
 ```sh
@@ -64,6 +74,7 @@ Successful tests attempt to drop their isolated database; failed tests may retai
 SQLx keeps `_sqlx_test` bookkeeping in the base database, and cleanup failures are warnings rather than guaranteed test failures.
 No command starts PostgreSQL automatically, and `make test-db` refuses to run without `TEST_DATABASE_URL`.
 The pre-commit hook remains database-free.
+Fast tests include bounded TLS wire peers with generated test certificates; they exercise the production SQLx TLS path and certificate rejection without running PostgreSQL.
 
 ## Feature boundaries
 
