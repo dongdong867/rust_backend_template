@@ -8,9 +8,11 @@ use actix_web::http::StatusCode;
 use actix_web::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName};
 use actix_web::{HttpResponse, test, web};
 use environment::HttpConfig;
-use rust_backend_template::create_app::create_app;
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+mod support;
+use support::create_app;
 
 #[derive(Deserialize)]
 struct TestBody {

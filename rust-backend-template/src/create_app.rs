@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use actix_cors::Cors;
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
@@ -11,10 +13,13 @@ use crate::api::middleware::request_id::request_id;
 use crate::api::middleware::request_timeout::request_timeout;
 use crate::api::middleware::security_headers::SecurityHeaders;
 use crate::api::route::health::config_health_routes;
+use crate::api::route::v1::tasks::config_task_routes;
+use crate::container::Container;
 
 /// Builds the application: every route, wrapped in the middleware every request passes through.
 pub fn create_app(
     http_config: HttpConfig,
+    container: Arc<Container>,
 ) -> App<
     impl ServiceFactory<
         ServiceRequest,
@@ -52,6 +57,7 @@ pub fn create_app(
 
     App::new()
         // Shared extractor and middleware state.
+        .app_data(web::Data::from(container.task_controller.clone()))
         .app_data(web::Data::new(http_config.clone()))
         .app_data(json_config)
         .app_data(web::PayloadConfig::new(http_config.request_body_limit))
@@ -62,4 +68,5 @@ pub fn create_app(
         .wrap(SecurityHeaders::middleware())
         .wrap(from_fn(request_id))
         .configure(config_health_routes)
+        .configure(config_task_routes)
 }

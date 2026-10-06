@@ -5,7 +5,9 @@ use std::time::Duration;
 use actix_web::http::header::HeaderMap;
 use actix_web::{HttpResponse, test, web};
 use environment::HttpConfig;
-use rust_backend_template::create_app::create_app;
+
+mod support;
+use support::create_app;
 
 fn assert_security_headers(headers: &HeaderMap) {
     assert_eq!(

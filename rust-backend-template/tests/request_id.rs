@@ -2,8 +2,10 @@
 
 use actix_web::test;
 use environment::HttpConfig;
-use rust_backend_template::create_app::create_app;
 use uuid::Uuid;
+
+mod support;
+use support::create_app;
 
 #[actix_web::test]
 async fn response_carries_a_new_request_id() {

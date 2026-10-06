@@ -2,26 +2,31 @@
 
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
+use std::sync::Arc;
 
 use actix_web::body::MessageBody;
 use actix_web::dev::{Server, ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::{App, Error, HttpServer};
 use environment::HttpConfig;
 
+use crate::container::Container;
 use crate::create_app::create_app;
 
 /// How long a stopping server waits for requests in progress before it closes them.
 pub const SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 /// Binds the configured port and serves the application until the server stops.
-pub async fn run(port: u16, http_config: HttpConfig) -> io::Result<()> {
+pub async fn run(port: u16, http_config: HttpConfig, container: Arc<Container>) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
     tracing::info!(
         address = %listener.local_addr()?,
         version = env!("CARGO_PKG_VERSION"),
         "listening"
     );
-    serve(listener, move || create_app(http_config.clone()))?.await
+    serve(listener, move || {
+        create_app(http_config.clone(), container.clone())
+    })?
+    .await
 }
 
 /// Serves the application that `app` builds on `listener`. The server stops gracefully on
@@ -54,8 +59,10 @@ mod tests {
     use std::time::Duration;
 
     use actix_web::{HttpResponse, web};
+    use tasks::framework::storage::InMemoryTaskStorageProvider;
 
     use super::*;
+    use crate::providers::Providers;
 
     async fn slow() -> HttpResponse {
         actix_web::rt::time::sleep(Duration::from_millis(300)).await;
@@ -79,7 +86,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = serve(listener, || {
-            create_app(HttpConfig::default()).route("/slow", web::get().to(slow))
+            let container = Arc::new(Container::with_providers(Providers {
+                task_storage: Arc::new(InMemoryTaskStorageProvider::new()),
+            }));
+            create_app(HttpConfig::default(), container).route("/slow", web::get().to(slow))
         })
         .unwrap();
         let handle = server.handle();
