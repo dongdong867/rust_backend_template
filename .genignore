@@ -1,0 +1,9 @@
+/.ddlc/
+/.delta/
+/.tools/
+/target/
+/scripts/
+*.env
+.env*
+!.example.env
+__pycache__/

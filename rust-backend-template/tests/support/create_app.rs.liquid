@@ -1,0 +1,28 @@
+use std::sync::Arc;
+
+use actix_web::body::MessageBody;
+use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
+use actix_web::{App, Error};
+use environment::HttpConfig;
+use {{crate_name}}::container::Container;
+use {{crate_name}}::providers::Providers;
+{% if include_tasks %}use tasks::framework::storage::InMemoryTaskStorageProvider;
+{% endif %}
+/// Builds the production application and composition {% if include_tasks %}with an in-memory storage provider{% else %}with selected providers{% endif %}.
+pub fn create_app(
+    http_config: HttpConfig,
+) -> App<
+    impl ServiceFactory<
+        ServiceRequest,
+        Config = (),
+        Response = ServiceResponse<impl MessageBody>,
+        Error = Error,
+        InitError = (),
+    >,
+> {
+{% if include_tasks %}    let provider = Arc::new(InMemoryTaskStorageProvider::new());
+{% endif %}    let container = Arc::new(Container::with_providers(Providers {% if include_tasks %}{
+        task_storage: provider,
+    }{% else %}{}{% endif %}));
+    {{crate_name}}::create_app::create_app(http_config, container)
+}

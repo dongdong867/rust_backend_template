@@ -6,13 +6,13 @@ This document explains the rules in [AGENTS.md](../AGENTS.md) and the reasons fo
 
 ```text
 Cargo.toml                        the workspace: members and shared dependency versions
-rust-backend-template/            the service package, named after the service
+{{project-name}}/            the service package, named after the service
   src/
     main.rs                       reads configuration, starts logging, runs the server
     lib.rs                        the library that main.rs and the tests import
     api/route/health.rs           GET /health: handler, response and route registration
-    api/route/v1/tasks.rs         task routes and controller error-to-status mapping
-    api/middleware/request_id.rs  request IDs and one log line per request
+{% if include_tasks %}    api/route/v1/tasks.rs         task routes and controller error-to-status mapping
+{% endif %}    api/middleware/request_id.rs  request IDs and one log line per request
     container.rs                  composes provider → repository → use cases → controller once
     database.rs                   creates the shared lazy PostgreSQL pool
     bin/migrate.rs                explicit migration command, never called by the server
@@ -22,8 +22,8 @@ rust-backend-template/            the service package, named after the service
   tests/                          in-memory HTTP tests and process tests
 crates/
   environment/                    Config::from_env, ConfigError, LogFormat
-  tasks/                          removable example business feature
-  <feature>/                      one crate per business feature
+{% if include_tasks %}  tasks/                          removable example business feature
+{% endif %}  <feature>/                      one crate per business feature
 migrations/                      versioned PostgreSQL schema changes
 ```
 
@@ -97,13 +97,15 @@ The pool has zero minimum connections and connects lazily, so startup and `/heal
 A query temporarily borrows a pooled connection; a transaction keeps its connection until commit or rollback.
 Further database work waits when all connections are borrowed.
 The process closes the shared pool after the HTTP server stops.
-`Container::new` creates the pool and selects the PostgreSQL storage provider from validated configuration.
-It delegates to `Container::with_providers`, the shared repository → use cases → controller assembly path.
+{% if include_tasks %}`Container::new` creates the pool and selects the PostgreSQL storage provider from validated configuration.
+{% else %}`Container::new` creates the pool from validated configuration; add provider selection here when composing a business feature.
+{% endif %}It delegates to `Container::with_providers`, the shared repository → use cases → controller assembly path.
 The container owns the pool and closes it through `shutdown` after the server stops.
 `Providers` is a typed bundle with one selected implementation per required port, not a list of every available backend.
 `Container::with_providers` supports explicitly injected providers; their external resources remain caller-owned.
-The existing `tests/support/create_app.rs` factory chooses in-memory providers and calls the shared assembly path.
-There is no additional `test_container()` wrapper or duplicated test graph.
+{% if include_tasks %}The existing `tests/support/create_app.rs` factory chooses in-memory providers and calls the shared assembly path.
+{% else %}The existing `tests/support/create_app.rs` factory builds the empty provider graph through the shared assembly path; inject port implementations here when adding a business feature.
+{% endif %}There is no additional `test_container()` wrapper or duplicated test graph.
 The server and application factory receive a shared container, while handlers receive only their specific controller as Actix data.
 
 Feature repositories receive this pool and own their queries.
@@ -207,7 +209,7 @@ Implement context-free error conversions with `From` on the destination type.
 Cross-layer conversions stay in the outer involved layer so their placement does not reverse dependencies.
 Domain/storage-record conversions live with the adapter storage DTO; storage/application error conversion lives with the adapter storage error, not the inner application error.
 
-## Tasks example
+{% if include_tasks %}## Tasks example
 
 The task aggregate owns its validated title, UUID, status and UTC timestamps.
 Titles contain 1–200 Unicode characters and are preserved exactly, including whitespace.
@@ -228,7 +230,7 @@ The migration constrains title length, status and status/completion consistency.
 Completion uses an atomic conditional update so concurrent attempts cannot both succeed.
 The storage-provider port specifies this guarantee; each provider implements it with conditional SQL or a locked in-memory update.
 
-## HTTP safety
+{% endif %}## HTTP safety
 
 Every client error and server error uses an RFC 9457 Problem Details body with `application/problem+json`:
 
@@ -278,7 +280,7 @@ The path excludes the query string, because a query can carry secrets.
 In JSON format, event fields sit at the top level and the span sits under `span`:
 
 ```json
-{"timestamp":"…","level":"INFO","message":"request completed","method":"GET","path":"/health","status":200,"duration_ms":0,"target":"rust_backend_template::api::middleware::request_id","span":{"request_id":"abc-123","name":"request"}}
+{"timestamp":"…","level":"INFO","message":"request completed","method":"GET","path":"/health","status":200,"duration_ms":0,"target":"{{crate_name}}::api::middleware::request_id","span":{"request_id":"abc-123","name":"request"}}
 ```
 
 Logs never contain secrets, SQL, connection strings or query strings.
@@ -298,16 +300,17 @@ The process logs `stopped` and exits with status 0 after a clean stop.
 ## Tests
 
 1. Unit tests sit next to the code they test.
-2. In-memory HTTP tests in `rust-backend-template/tests/` build the real App with `create_app()` and call it through Actix's test service, with outbound ports replaced where needed.
+2. In-memory HTTP tests in `{{project-name}}/tests/` build the real App with `create_app()` and call it through Actix's test service, with outbound ports replaced where needed.
 3. Process tests in the same folder start the built binary with real settings and talk to it over TCP.
 
 Log output is checked in process tests.
 Tracing caches each log call's enabled state for the whole process, so a test-scoped subscriber misses events when other tests run in parallel.
 
 `make test` is the routine feedback loop: domain/use-case tests with fake outbound ports, shared-repository conversion tests, in-memory HTTP tests with the real composition, and process liveness/configuration tests.
-It never contacts PostgreSQL; the real repository test is ignored in ordinary Cargo test runs.
-The in-memory framework provider is available only with the tasks crate's `test-support` feature, enabled by the service's dev dependency.
-Tests can replace outbound ports without importing concrete framework providers into production application or adapter code.
+{% if include_tasks %}It never contacts PostgreSQL; the real repository test is ignored in ordinary Cargo test runs.
+{% else %}It never contacts PostgreSQL; real database scaffold checks are ignored in ordinary Cargo test runs.
+{% endif %}{% if include_tasks %}The in-memory framework provider is available only with the tasks crate's `test-support` feature, enabled by the service's dev dependency.
+{% endif %}Tests can replace outbound ports without importing concrete framework providers into production application or adapter code.
 Process tests explicitly supply a valid test DATABASE_URL; the lazy pool leaves these tests database-free.
 The production TLS regression uses a bounded local TLS wire peer, checks encrypted PostgreSQL startup with `verify-full`, and asserts certificate rejection with an untrusted CA.
 It runs no PostgreSQL process, implements no authentication or SQL, generates private test keys only in memory, and removes its temporary public certificate file.
@@ -317,10 +320,10 @@ It requires an explicit `TEST_DATABASE_URL` and an already-running dedicated Pos
 The generic scaffold smoke test reads TEST_DATABASE_URL, creates an isolated database, connects through the production pool and applies the committed migrations twice.
 It closes its pool and drops the database after success, returned errors and body panics; cleanup failures fail the test.
 These checks remain when the migration directory contains no business-feature migrations.
-For the tasks repository tests, the command maps that URL to SQLx's DATABASE_URL only for the subprocess.
+{% if include_tasks %}For the tasks repository tests, the command maps that URL to SQLx's DATABASE_URL only for the subprocess.
 SQLx's test harness creates isolated databases and exercises create/get/complete, conflict and constraints.
 Those tests attempt cleanup on success and may retain failed databases for inspection; SQLx keeps _sqlx_test bookkeeping in the base database and cleanup warnings do not necessarily fail them.
-The tests do not apply business migrations to the base database or start a server automatically.
+{% endif %}The tests do not apply business migrations to the base database or start a server automatically.
 
 `make check` combines lint, fast tests and real database tests for the complete publication candidate.
 Do not add real database tests to the pre-commit hook.

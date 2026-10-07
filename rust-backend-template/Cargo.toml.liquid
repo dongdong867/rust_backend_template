@@ -1,0 +1,30 @@
+[package]
+name = "{{project-name}}"
+default-run = "{{project-name}}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+actix-cors.workspace = true
+actix-web.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+environment.workspace = true
+{% if include_tasks %}tasks.workspace = true
+{% endif %}
+[dev-dependencies]
+{% if include_tasks %}chrono.workspace = true
+{% endif %}rcgen = "0.14.10"
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "net"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+url.workspace = true
+{% if include_tasks %}tasks = { workspace = true, features = ["test-support"] }
+{% endif -%}

@@ -1,0 +1,209 @@
+//! HTTP acceptance tests run the real application without contacting PostgreSQL.
+
+use std::sync::Arc;
+
+use actix_web::body::MessageBody;
+use actix_web::dev::ServiceResponse;
+use actix_web::http::header::CONTENT_TYPE;
+use actix_web::{http::StatusCode, test};
+use chrono::DateTime;
+use environment::HttpConfig;
+use {{crate_name}}::{
+    container::Container, create_app::create_app as create_app_with_container, providers::Providers,
+};
+use serde_json::{Value, json};
+use tasks::framework::storage::InMemoryTaskStorageProvider;
+use uuid::Uuid;
+
+mod support;
+use support::create_app;
+
+async fn assert_problem<B: MessageBody>(response: ServiceResponse<B>, status: StatusCode) {
+    assert_eq!(response.status(), status);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        "application/problem+json"
+    );
+    assert!(response.headers().contains_key("x-request-id"));
+    assert!(response.headers().contains_key("x-content-type-options"));
+    assert_eq!(
+        test::read_body_json::<Value, _>(response).await,
+        json!({"title": status.canonical_reason().unwrap(), "status": status.as_u16()}),
+    );
+}
+
+#[actix_web::test]
+async fn creates_a_task() {
+    let app = test::init_service(create_app(HttpConfig::default())).await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/tasks")
+            .set_json(json!({"title": "Write documentation"}))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["title"], "Write documentation");
+    assert_eq!(body["status"], "open");
+    assert_eq!(body["completed_at"], Value::Null);
+    Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+    DateTime::parse_from_rfc3339(body["created_at"].as_str().unwrap()).unwrap();
+}
+
+#[actix_web::test]
+async fn retrieves_and_completes_the_created_task_without_changing_its_identity() {
+    let app = test::init_service(create_app(HttpConfig::default())).await;
+    let created: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/tasks")
+            .set_json(json!({"title": " Ship "}))
+            .to_request(),
+    )
+    .await;
+    let path = format!("/v1/tasks/{}", created["id"].as_str().unwrap());
+    let response = test::call_service(&app, test::TestRequest::get().uri(&path).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(test::read_body_json::<Value, _>(response).await, created);
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("{path}/complete"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let completed: Value = test::read_body_json(response).await;
+    for field in ["id", "title", "created_at"] {
+        assert_eq!(completed[field], created[field]);
+    }
+    assert_eq!(completed["status"], "completed");
+    let completed_at =
+        DateTime::parse_from_rfc3339(completed["completed_at"].as_str().unwrap()).unwrap();
+    let created_at = DateTime::parse_from_rfc3339(created["created_at"].as_str().unwrap()).unwrap();
+    assert!(completed_at >= created_at);
+    assert_eq!(completed_at.offset().local_minus_utc(), 0);
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("{path}/complete"))
+            .to_request(),
+    )
+    .await;
+    assert_problem(response, StatusCode::CONFLICT).await;
+    let stored: Value =
+        test::call_and_read_body_json(&app, test::TestRequest::get().uri(&path).to_request()).await;
+    assert_eq!(stored, completed);
+}
+
+#[actix_web::test]
+async fn title_validation_counts_characters_and_preserves_whitespace() {
+    let app = test::init_service(create_app(HttpConfig::default())).await;
+    for title in ["a".to_owned(), " ".to_owned(), "界".repeat(200)] {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/v1/tasks")
+                .set_json(json!({"title": title}))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body["title"], title);
+    }
+    for title in [String::new(), "界".repeat(201), "before\0after".to_owned()] {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/v1/tasks")
+                .set_json(json!({"title": title}))
+                .to_request(),
+        )
+        .await;
+        assert_problem(response, StatusCode::BAD_REQUEST).await;
+    }
+}
+
+#[actix_web::test]
+async fn a_missing_task_is_not_found_for_both_operations() {
+    let app = test::init_service(create_app(HttpConfig::default())).await;
+    let path = format!("/v1/tasks/{}", Uuid::nil());
+    for request in [
+        test::TestRequest::get().uri(&path).to_request(),
+        test::TestRequest::post()
+            .uri(&format!("{path}/complete"))
+            .to_request(),
+    ] {
+        assert_problem(
+            test::call_service(&app, request).await,
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+    }
+}
+
+#[actix_web::test]
+async fn malformed_task_ids_are_bad_requests() {
+    let app = test::init_service(create_app(HttpConfig::default())).await;
+    for request in [
+        test::TestRequest::get()
+            .uri("/v1/tasks/not-a-uuid")
+            .to_request(),
+        test::TestRequest::post()
+            .uri("/v1/tasks/not-a-uuid/complete")
+            .to_request(),
+    ] {
+        assert_problem(
+            test::call_service(&app, request).await,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+}
+
+#[actix_web::test]
+async fn malformed_or_missing_titles_use_the_same_safe_error_contract() {
+    let app = test::init_service(create_app(HttpConfig::default())).await;
+    for body in [r#"{"title":42}"#, "{}", "{secret input"] {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/v1/tasks")
+                .insert_header((CONTENT_TYPE, "application/json"))
+                .set_payload(body)
+                .to_request(),
+        )
+        .await;
+        assert_problem(response, StatusCode::BAD_REQUEST).await;
+    }
+}
+
+#[actix_web::test]
+async fn persistence_failures_are_safe_internal_errors_on_every_endpoint() {
+    let failed = Arc::new(Container::with_providers(Providers {
+        task_storage: Arc::new(InMemoryTaskStorageProvider::with_persistence_failure()),
+    }));
+    let app = test::init_service(create_app_with_container(HttpConfig::default(), failed)).await;
+    let path = format!("/v1/tasks/{}", Uuid::nil());
+    for request in [
+        test::TestRequest::post()
+            .uri("/v1/tasks")
+            .set_json(json!({"title":"valid"}))
+            .to_request(),
+        test::TestRequest::get().uri(&path).to_request(),
+        test::TestRequest::post()
+            .uri(&format!("{path}/complete"))
+            .to_request(),
+    ] {
+        assert_problem(
+            test::call_service(&app, request).await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+    }
+}

@@ -1,0 +1,137 @@
+//! Verifies the production SQLx TLS path using a TLS wire peer, not a PostgreSQL server.
+
+use std::io::Write;
+use std::sync::Arc;
+use std::time::Duration;
+
+use environment::Config;
+use rcgen::generate_simple_self_signed;
+use {{crate_name}}::database::create_pool;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::{ServerConfig, pki_types::PrivatePkcs8KeyDer};
+use url::Url;
+
+const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
+
+#[actix_web::test]
+async fn production_pool_negotiates_tls_with_verified_server_certificate() {
+    assert!(tls_startup_observed(true).await);
+}
+
+#[actix_web::test]
+async fn production_pool_rejects_an_untrusted_server_certificate() {
+    assert!(!tls_startup_observed(false).await);
+}
+
+async fn tls_startup_observed(trust_server: bool) -> bool {
+    let certificate = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+    let mut trusted_certificate = tempfile::NamedTempFile::new().unwrap();
+    let trusted_pem = if trust_server {
+        certificate.cert.pem()
+    } else {
+        generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
+            .unwrap()
+            .cert
+            .pem()
+    };
+    trusted_certificate
+        .write_all(trusted_pem.as_bytes())
+        .unwrap();
+    let server_config = ServerConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![certificate.cert.der().clone()],
+        PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der()).into(),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut peer = actix_web::rt::spawn(observe_peer(listener, server_config, trust_server));
+
+    let mut uri = Url::parse(&format!("postgres://tls_probe@{address}/tls_probe")).unwrap();
+    uri.query_pairs_mut()
+        .append_pair("sslmode", "verify-full")
+        .append_pair("sslrootcert", trusted_certificate.path().to_str().unwrap());
+    let config =
+        Config::from_lookup(|name| (name == "DATABASE_URL").then(|| uri.to_string())).unwrap();
+    let pool = create_pool(&config.database).unwrap();
+    let client_pool = pool.clone();
+    let mut connection = actix_web::rt::spawn(async move { client_pool.acquire().await });
+    let observed = actix_web::rt::time::timeout(Duration::from_secs(5), &mut peer).await;
+    if observed.is_err() {
+        peer.abort();
+        let _ = peer.await;
+    }
+    if trust_server {
+        connection.abort();
+        let _ = connection.await;
+    } else {
+        let rejected = actix_web::rt::time::timeout(Duration::from_secs(5), &mut connection).await;
+        if rejected.is_err() {
+            connection.abort();
+            let _ = connection.await;
+        }
+        let result = rejected
+            .expect("TLS rejection timed out")
+            .expect("client task failed");
+        let error = result.expect_err("untrusted certificate must not connect");
+        let tls_error = match &error {
+            sqlx::Error::Io(error) => error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<tokio_rustls::rustls::Error>()),
+            sqlx::Error::Tls(error) => error.downcast_ref::<tokio_rustls::rustls::Error>(),
+            _ => None,
+        };
+        assert!(
+            matches!(
+                tls_error,
+                Some(tokio_rustls::rustls::Error::InvalidCertificate(_))
+            ),
+            "expected untrusted-certificate rejection, got {error:?}"
+        );
+    }
+    pool.close().await;
+    observed
+        .expect("TLS peer timed out")
+        .expect("TLS peer failed")
+}
+
+async fn observe_peer(
+    listener: TcpListener,
+    server_config: ServerConfig,
+    trust_server: bool,
+) -> bool {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut request = [0; 8];
+    socket.read_exact(&mut request).await.unwrap();
+    assert_eq!(request, SSL_REQUEST);
+    socket.write_all(b"S").await.unwrap();
+    let mut encrypted = match TlsAcceptor::from(Arc::new(server_config))
+        .accept(socket)
+        .await
+    {
+        Ok(encrypted) => encrypted,
+        Err(error) => {
+            assert!(!trust_server, "unexpected TLS failure: {error}");
+            return false;
+        }
+    };
+    let length = encrypted.read_u32().await.unwrap() as usize;
+    assert!((8..=4096).contains(&length));
+    let mut startup = vec![0; length - 4];
+    encrypted.read_exact(&mut startup).await.unwrap();
+    assert_eq!(&startup[..4], &[0, 3, 0, 0]);
+    assert!(
+        startup
+            .windows(b"tls_probe".len())
+            .any(|bytes| bytes == b"tls_probe")
+    );
+    // Close after encrypted startup: this peer deliberately implements no authentication or SQL.
+    true
+}
