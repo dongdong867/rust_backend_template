@@ -2,7 +2,9 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -29,6 +31,30 @@ class TemplateChecksTest(unittest.TestCase):
         destination = root / path
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(text)
+
+    def prepare_ignore_rules(self):
+        subprocess.run(["git", "init", "--quiet", str(self.source)], check=True)
+        self.write(self.source, ".gitignore", (template_test.ROOT / ".gitignore").read_text())
+
+    def is_ignored(self, name):
+        return subprocess.run(
+            ["git", "-c", f"core.excludesFile={os.devnull}",
+             "check-ignore", "--quiet", "--no-index", name],
+            cwd=self.source,
+        ).returncode == 0
+
+    def test_local_environment_variants_are_ignored(self):
+        self.prepare_ignore_rules()
+        for name in (".env", ".env.local", ".env.production", ".envrc", "private.env"):
+            with self.subTest(name=name):
+                self.assertTrue(self.is_ignored(name))
+
+    def test_template_sources_remain_trackable(self):
+        self.prepare_ignore_rules()
+        for name in (".example.env", ".example.env.liquid", "Cargo.lock",
+                     "Cargo.toml.liquid", "cargo-generate.toml", ".template/post.rhai"):
+            with self.subTest(name=name):
+                self.assertFalse(self.is_ignored(name))
 
     def project(self, include_tasks=False):
         for path in (
