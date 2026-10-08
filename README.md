@@ -11,21 +11,13 @@ cargo install cargo-generate --version 0.25.0 --locked
 cargo generate --git https://github.com/dongdong867/rust_backend_template.git --name my-service
 ```
 
-The generator is pinned to **cargo-generate 0.25.0** because this template relies on its `.liquid` twin rendering and hook behavior.
-Choose `include_tasks=true` for the removable business feature, or `false` for the service scaffold alone.
-Both choices retain PostgreSQL configuration, the lazy pool and shutdown ownership, the migration binary, and generic real-database checks.
-Without the business feature, `migrations/.gitkeep` retains an empty migration directory for future schema changes.
+Use **cargo-generate 0.25.0**; the template relies on that version's rendering and hooks.
+Choose whether to include the removable tasks example. Both choices retain PostgreSQL and migration support.
+Review the hooks before approving their execution, especially for an untrusted template.
+Generation runs Cargo and requires Unix `ln` for the agent-instructions symlink; dependency resolution may need network access.
 
-Review and approve the template hooks when cargo-generate asks for permission; do not bypass approval for an untrusted template.
-Hooks remove optional files, rename the service package, run `cargo generate-lockfile`, run `cargo fmt --all` to normalize renamed imports, and on Unix run `ln -s AGENTS.md CLAUDE.md` in the generated destination to recreate the agent-instructions symlink.
-Generation therefore needs permission to execute Cargo and the symlink command, and may need registry/network access to resolve dependencies.
-Each generated project gets its own lockfile after its manifests are finalized; compatible dependency versions can differ between generation dates.
-Names must not collide with retained package names (`environment`, and `tasks` when included), the `migrate` binary, or existing root paths such as `crates`, `docs` and `migrations`.
-
-Template maintainers run `TEST_DATABASE_URL=postgres://localhost/postgres make template-test` with cargo-generate 0.25.0 installed.
-It checks twin/source drift and generates both choices in temporary directories, then runs `make check` in each.
-It requires the dedicated, already-running test server described below and never starts PostgreSQL.
-Generated services do not retain this generator-maintenance command.
+Template maintainers run `TEST_DATABASE_URL=postgres://localhost/postgres make template-test` to check the Liquid twins and fully verify both generated variants.
+This requires the dedicated test server described under [Develop](#develop).
 
 ## Run it
 
@@ -47,13 +39,19 @@ The binary reads its process environment; `make run` and `make migrate` load `.e
 `DATABASE_URL` must be explicitly supplied; a missing value stops startup instead of selecting a local database.
 `.example.env` supplies a placeholder for local setup, not a runtime default.
 
+### Configure it
+
+[.example.env](.example.env) lists the settings and local example values. Supply production settings through the process environment.
+To allow browser access, set `HTTP_CORS_ALLOWED_ORIGINS` to comma-separated HTTP(S) origins.
+An origin such as `https://*.example.com` includes the apex and subdomains, but only with the same scheme and port.
+The empty allowlist permits no cross-origin browser access; CORS is not authentication or authorization.
+`HTTP_REQUEST_TIMEOUT_SECS` sets the request deadline; `HTTP_REQUEST_BODY_LIMIT_BYTES` limits buffered request bodies.
+
 ### Database transport and connection options
 
-The PostgreSQL client includes rustls with platform trust roots.
 For deployments requiring authenticated encryption, set `sslmode=verify-full` in `DATABASE_URL` and use the database server's certificate hostname.
 If its CA is not in the platform trust store, also supply `sslrootcert` pointing to the trusted public CA certificate.
-SQLx's default `sslmode=prefer` still permits plaintext fallback, which keeps local PostgreSQL setups usable; enabling TLS capability does not make that mode require encryption.
-Unknown or malformed connection parameter names fail startup with a redacted `DATABASE_URL` error before SQLx parses them.
+The default `sslmode=prefer` permits plaintext fallback; it does not require encryption.
 When putting a URL with `&` query separators in a shell-loaded `.env`, quote the complete value.
 Supply real credentials through the deployment environment or an ignored local file, never committed examples.
 
@@ -69,9 +67,7 @@ curl -X POST 'localhost:8080/v1/tasks/<id>/complete'
 
 Create returns `201`; get and complete return `200` with the task.
 Completing an already-completed task returns `409`.
-Titles are preserved as submitted and must contain 1–200 Unicode characters.
-The null character U+0000 is rejected with `400` because PostgreSQL text cannot store it.
-Errors use safe RFC 9457 problem details, with no internal SQL or connection information.
+Titles are preserved as submitted and must contain 1–200 Unicode characters, excluding U+0000; invalid titles return `400`.
 
 ## Develop
 
@@ -95,21 +91,11 @@ TEST_DATABASE_URL=postgres://localhost/postgres make check
 ```
 
 Use a **dedicated test server**, not production. Its role needs `CREATEDB` permission.
-The generic scaffold smoke check creates its own isolated database, applies the committed migrations twice (including an empty directory), closes its pool and drops the database.
-It attempts cleanup after returned errors and body panics, and cleanup failures fail the test.
-The tasks repository tests use SQLx's test harness, which creates isolated databases and keeps `_sqlx_test` bookkeeping in the base database.
-Those tests attempt cleanup on success, may retain failed databases for inspection, and report cleanup failures as warnings.
-No test applies business migrations to the URL's base database.
-No command starts PostgreSQL automatically, and `make test-db` refuses to run without `TEST_DATABASE_URL`.
+Database tests create isolated databases and may leave failed-test databases or harness bookkeeping for inspection.
+They require `TEST_DATABASE_URL`; no command starts PostgreSQL automatically.
 The pre-commit hook remains database-free.
-Fast tests include bounded TLS wire peers with generated test certificates; they exercise the production SQLx TLS path and certificate rejection without running PostgreSQL.
 
-## Feature boundaries
+## Changing the service
 
-Each feature owns its domain, application, adapter and framework layers.
-The shared adapter repository maps domain objects to plain storage DTOs and depends on a storage-provider interface.
-Concrete PostgreSQL and in-memory providers live in that feature's `framework/storage/`; the service crate chooses and injects the provider.
-Application operations are concrete `*UseCase` types.
-`AGENTS.md` and architecture documentation define dependency rules; code review checks them instead of a custom source parser.
-
-[AGENTS.md](AGENTS.md) holds the project rules, and [docs/architecture.md](docs/architecture.md) explains them.
+Read [AGENTS.md](AGENTS.md) for coding rules and required checks.
+Use [docs/architecture.md](docs/architecture.md) when deciding where new code belongs or changing dependency composition, configuration, or resource ownership.
