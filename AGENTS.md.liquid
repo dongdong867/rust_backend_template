@@ -1,4 +1,4 @@
-# rust-backend-template
+# {{project-name}}
 
 An HTTP service in Rust with Actix Web.
 Read this file before changing code. [docs/architecture.md](docs/architecture.md) has the detail and the reasons.
@@ -19,8 +19,8 @@ Run `make hooks-install` once per clone so each commit checks formatting first.
 
 ## Rules
 
-- The repository root holds the workspace `Cargo.toml`, the service package in `rust-backend-template/`, and every other crate in `crates/`.
-- The service package owns startup and shutdown, logging, dependency composition, route registration, middleware, and the mapping from errors to HTTP status codes. Its library is imported as `rust_backend_template`.
+- The repository root holds the workspace `Cargo.toml`, the service package in `{{project-name}}/`, and every other crate in `crates/`.
+- The service package owns startup and shutdown, logging, dependency composition, route registration, middleware, and the mapping from errors to HTTP status codes. Its library is imported as `{{crate_name}}`.
 - `crates/environment` reads configuration once at startup. Only the service package depends on it. `Config` stays at the crate root; subordinate validated setting types live under `src/setting/`. A new setting gets a named environment variable, a validated type and tests, and an invalid value stops startup with a message that names the setting. Do not add a general mode switch such as `APP_ENV`. See [configuration rationale](docs/architecture.md#configuration).
 - Each business feature is one crate under `crates/` with `domain`, `application`, `adapter` and `framework` layers, and folders by kind inside each layer. See the [dependency placement guide](docs/architecture.md#dependency-placement).
 - One type per file, named after the type in snake case. A parent module file only declares its modules and re-exports their types.

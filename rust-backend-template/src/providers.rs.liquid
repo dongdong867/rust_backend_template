@@ -1,0 +1,8 @@
+{% if include_tasks %}use std::sync::Arc;
+
+use tasks::adapter::port::out::TaskStorageProvider;
+
+{% endif %}/// Selected implementations of the provider ports needed by the application.
+pub struct Providers {% if include_tasks %}{
+    pub task_storage: Arc<dyn TaskStorageProvider>,
+}{% else %}{}{% endif %}

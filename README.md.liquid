@@ -1,8 +1,8 @@
-# rust-backend-template
+# {{project-name}}
 
 A starting point for an HTTP service in Rust with Actix Web.
 
-## Generate a service
+{% if template_source %}## Generate a service
 
 Use `cargo generate`, not GitHub's "Use this template" button:
 
@@ -19,7 +19,7 @@ Generation runs Cargo and requires Unix `ln` for the agent-instructions symlink;
 Template maintainers run `TEST_DATABASE_URL=postgres://localhost/postgres make template-test` to check the Liquid twins and fully verify both generated variants.
 This requires the dedicated test server described under [Develop](#develop).
 
-## Run it
+{% endif %}## Run it
 
 You need Rust (the pinned version in `rust-toolchain.toml` installs itself) and the pinned Taplo CLI (`make tools`).
 Database operations need an already-running PostgreSQL server; PostgreSQL 18 is the tested version.
@@ -28,7 +28,7 @@ Create the application's database once, then apply its migrations:
 ```sh
 cp .example.env .env
 # Set DATABASE_URL in .env to your application's PostgreSQL database before running.
-createdb rust_backend_template
+createdb {{crate_name}}
 make migrate
 make run
 curl localhost:8080/health    # {"status":"ok"}
@@ -55,7 +55,7 @@ The default `sslmode=prefer` permits plaintext fallback; it does not require enc
 When putting a URL with `&` query separators in a shell-loaded `.env`, quote the complete value.
 Supply real credentials through the deployment environment or an ignored local file, never committed examples.
 
-## Tasks example
+{% if include_tasks %}## Tasks example
 
 ```sh
 curl -X POST localhost:8080/v1/tasks \
@@ -69,7 +69,7 @@ Create returns `201`; get and complete return `200` with the task.
 Completing an already-completed task returns `409`.
 Titles are preserved as submitted and must contain 1–200 Unicode characters, excluding U+0000; invalid titles return `400`.
 
-## Develop
+{% endif %}## Develop
 
 ```sh
 make hooks-install   # check formatting before each commit

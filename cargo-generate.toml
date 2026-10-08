@@ -1,0 +1,20 @@
+[template]
+cargo_generate_version = "=0.25.0"
+# Only these surfaces contain Liquid. In particular, GitHub expressions stay literal.
+include = [
+  "Cargo.toml",
+  "Makefile",
+  "README.md",
+  "AGENTS.md",
+  ".example.env",
+  "rust-backend-template/**",
+]
+
+[placeholders.include_tasks]
+type = "bool"
+prompt = "Include the tasks example?"
+default = true
+
+[hooks]
+pre = [".template/pre.rhai"]
+post = [".template/post.rhai"]
