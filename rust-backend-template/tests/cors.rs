@@ -22,6 +22,7 @@ fn http_config(cors_enabled: bool, origins: &[&str]) -> HttpConfig {
         "DATABASE_URL" => Some("postgres://localhost/http_test".to_owned()),
         "HTTP_CORS_ENABLED" => Some(cors_enabled.to_string()),
         "HTTP_CORS_ALLOWED_ORIGINS" => Some(origins.join(",")),
+        "API_DOC_PASSWORD" => Some("documentation-test-password".to_owned()),
         _ => None,
     })
     .unwrap()

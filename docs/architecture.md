@@ -82,6 +82,12 @@ Buffered extractors share the configured body limit. A route streaming raw paylo
 An HTML route must supply an appropriate route-specific CSP rather than weakening the API-wide policy.
 The HTTPS ingress or reverse proxy owns HSTS because it knows whether the connection is secure.
 
+The optional `api-doc` Cargo feature keeps documentation dependencies out of default builds.
+Schema derives on adapter DTOs are feature-gated; they do not move HTTP composition into feature crates.
+The service owns schema composition and one Basic-authenticated `/docs/` scope for UI, JSON and assets.
+Its vendored UI has a scoped CSP; API routes keep their strict policy and existing CORS rules.
+Documentation authentication is not API authentication, and credentials remain redacted configuration.
+
 Unit tests replace ports without pulling framework implementations into inner layers.
 Public-interface integration tests may compose real providers; in-memory HTTP tests exercise the actual application assembly.
 Real-database tests cover SQL, row mapping, migrations, and concurrency that port doubles cannot prove.

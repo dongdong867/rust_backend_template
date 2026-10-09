@@ -21,7 +21,11 @@ async fn postgres_pool_connects_and_migrations_are_repeatable() {
     let database_name = format!("scaffold_smoke_{}", Uuid::new_v4().simple());
     isolated_url.set_path(&format!("/{database_name}"));
     let config = Config::from_lookup(|name| {
-        (name == "DATABASE_URL").then(|| isolated_url.as_str().to_owned())
+        (name == "DATABASE_URL")
+            .then(|| isolated_url.as_str().to_owned())
+            .or_else(|| {
+                (name == "API_DOC_PASSWORD").then(|| "documentation-test-password".to_owned())
+            })
     })
     .unwrap_or_else(|_| panic!("isolated DATABASE_URL failed environment validation"));
     let pool = create_pool(&config.database)

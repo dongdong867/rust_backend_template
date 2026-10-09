@@ -10,6 +10,7 @@ const PROBLEM_DETAILS_MEDIA_TYPE: &str = "application/problem+json";
 
 /// The safe RFC 9457 response returned for every HTTP error.
 #[derive(Serialize)]
+#[cfg_attr(feature = "api-doc", derive(utoipa::ToSchema))]
 pub(crate) struct ProblemDetails {
     title: &'static str,
     status: u16,

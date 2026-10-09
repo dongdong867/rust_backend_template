@@ -24,5 +24,10 @@ pub fn create_app(
     let container = Arc::new(Container::with_providers(Providers {
         task_storage: provider,
     }));
-    rust_backend_template::create_app::create_app(http_config, container)
+    rust_backend_template::create_app::create_app(
+        http_config,
+        container,
+        #[cfg(feature = "api-doc")]
+        environment::ApiDocConfig::new("docs", "documentation-test-password").unwrap(),
+    )
 }

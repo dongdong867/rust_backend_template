@@ -61,7 +61,7 @@ mod tests {
         let result = supplied.clone();
         let repository = Arc::new(MockTaskRepository::new([RepositoryExpectation::Create(
             Box::new(move |task| {
-                assert_eq!(task.title(), "  界\n ");
+                assert_eq!(task.title(), "  \u{754c}\n ");
                 assert_eq!(task.status(), TaskStatus::Open);
                 assert!(task.completed_at().is_none());
                 Ok(result)
@@ -70,7 +70,7 @@ mod tests {
         let service = CreateTaskUseCase::new(repository.clone());
         let task = service
             .execute(CreateTaskCommand {
-                title: "  界\n ".into(),
+                title: "  \u{754c}\n ".into(),
             })
             .await
             .unwrap();

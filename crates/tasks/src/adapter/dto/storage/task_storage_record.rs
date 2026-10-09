@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn converts_every_field_without_losing_domain_invariants() {
-        let mut task = Task::new("  界\n ".into()).unwrap();
+        let mut task = Task::new("  \u{754c}\n ".into()).unwrap();
         for status in [TaskStatus::Open, TaskStatus::Completed] {
             if status == TaskStatus::Completed {
                 task.complete().unwrap();

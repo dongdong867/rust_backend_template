@@ -96,7 +96,7 @@ mod tests {
     fn open() -> TaskStorageRecord {
         TaskStorageRecord {
             id: Uuid::new_v4(),
-            title: "  界\n ".into(),
+            title: "  \u{754c}\n ".into(),
             status: "open".into(),
             created_at: Utc::now(),
             completed_at: None,
@@ -116,7 +116,7 @@ mod tests {
             provider.get(Uuid::new_v4()).await,
             Err(TaskStorageError::NotFound)
         );
-        for title in ["".to_owned(), "界".repeat(201), "a\0b".into()] {
+        for title in ["".to_owned(), "\u{754c}".repeat(201), "a\0b".into()] {
             let mut invalid = open();
             invalid.title = title;
             assert_eq!(
@@ -125,7 +125,7 @@ mod tests {
             );
         }
         let mut boundary = open();
-        boundary.title = "界".repeat(200);
+        boundary.title = "\u{754c}".repeat(200);
         assert_eq!(provider.create(boundary.clone()).await.unwrap(), boundary);
         let mut candidate = row.clone();
         candidate.status = "completed".into();

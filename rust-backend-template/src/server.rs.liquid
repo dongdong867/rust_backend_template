@@ -16,21 +16,33 @@ use crate::create_app::create_app;
 pub const SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 /// Binds the configured port and serves the application until the server stops.
-pub async fn run(port: u16, http_config: HttpConfig, container: Arc<Container>) -> io::Result<()> {
+pub async fn run(
+    port: u16,
+    http_config: HttpConfig,
+    container: Arc<Container>,
+    #[cfg(feature = "api-doc")] api_doc_config: environment::ApiDocConfig,
+) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
+
     tracing::info!(
         address = %listener.local_addr()?,
         version = env!("CARGO_PKG_VERSION"),
         "listening"
     );
+
     serve(listener, move || {
-        create_app(http_config.clone(), container.clone())
+        create_app(
+            http_config.clone(),
+            container.clone(),
+            #[cfg(feature = "api-doc")] api_doc_config.clone(),
+        )
     })?
     .await
 }
 
-/// Serves the application that `app` builds on `listener`. The server stops gracefully on
-/// SIGTERM and stops at once on SIGINT or SIGQUIT.
+/// Serves the application that `app` builds on `listener`.
+///
+/// The server stops gracefully on SIGTERM and stops at once on SIGINT or SIGQUIT.
 pub fn serve<T, B>(
     listener: TcpListener,
     app: impl Fn() -> App<T> + Send + Clone + 'static,
@@ -89,7 +101,11 @@ mod tests {
             let container = Arc::new(Container::with_providers(Providers {% if include_tasks %}{
                 task_storage: Arc::new(InMemoryTaskStorageProvider::new()),
             }{% else %}{}{% endif %}));
-            create_app(HttpConfig::default(), container).route("/slow", web::get().to(slow))
+            create_app(
+                HttpConfig::default(), container,
+                #[cfg(feature = "api-doc")]
+                environment::ApiDocConfig::new("docs", "documentation-test-password").unwrap(),
+            ).route("/slow", web::get().to(slow))
         })
         .unwrap();
         let handle = server.handle();

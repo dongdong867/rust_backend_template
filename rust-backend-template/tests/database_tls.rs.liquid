@@ -58,8 +58,11 @@ async fn tls_startup_observed(trust_server: bool) -> bool {
     uri.query_pairs_mut()
         .append_pair("sslmode", "verify-full")
         .append_pair("sslrootcert", trusted_certificate.path().to_str().unwrap());
-    let config =
-        Config::from_lookup(|name| (name == "DATABASE_URL").then(|| uri.to_string())).unwrap();
+    let config = Config::from_lookup(|name| match name {
+        "DATABASE_URL" => Some(uri.to_string()),
+        "API_DOC_PASSWORD" => Some("documentation-test-password".to_owned()),
+        _ => None,
+    }).unwrap();
     let pool = create_pool(&config.database).unwrap();
     let client_pool = pool.clone();
     let mut connection = actix_web::rt::spawn(async move { client_pool.acquire().await });

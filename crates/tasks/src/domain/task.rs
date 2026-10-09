@@ -79,13 +79,13 @@ mod tests {
 
     #[test]
     fn title_counts_unicode_characters_and_preserves_whitespace() {
-        for title in [" ", "  hello\n ", &"界".repeat(200)] {
+        for title in [" ", "  hello\n ", &"\u{754c}".repeat(200)] {
             let task = Task::new(title.to_owned()).unwrap();
             assert_eq!(task.title, title);
             assert_eq!(task.status, TaskStatus::Open);
             assert!(task.completed_at.is_none());
         }
-        for title in ["".to_owned(), "界".repeat(201)] {
+        for title in ["".to_owned(), "\u{754c}".repeat(201)] {
             assert_eq!(Task::new(title), Err(TaskError::InvalidTitle));
         }
     }

@@ -24,5 +24,9 @@ pub fn create_app(
 {% endif %}    let container = Arc::new(Container::with_providers(Providers {% if include_tasks %}{
         task_storage: provider,
     }{% else %}{}{% endif %}));
-    {{crate_name}}::create_app::create_app(http_config, container)
+    {{crate_name}}::create_app::create_app(
+        http_config, container,
+        #[cfg(feature = "api-doc")]
+        environment::ApiDocConfig::new("docs", "documentation-test-password").unwrap(),
+    )
 }

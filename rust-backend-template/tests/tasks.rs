@@ -103,7 +103,7 @@ async fn retrieves_and_completes_the_created_task_without_changing_its_identity(
 #[actix_web::test]
 async fn title_validation_counts_characters_and_preserves_whitespace() {
     let app = test::init_service(create_app(HttpConfig::default())).await;
-    for title in ["a".to_owned(), " ".to_owned(), "界".repeat(200)] {
+    for title in ["a".to_owned(), " ".to_owned(), "\u{754c}".repeat(200)] {
         let response = test::call_service(
             &app,
             test::TestRequest::post()
@@ -116,7 +116,11 @@ async fn title_validation_counts_characters_and_preserves_whitespace() {
         let body: Value = test::read_body_json(response).await;
         assert_eq!(body["title"], title);
     }
-    for title in [String::new(), "界".repeat(201), "before\0after".to_owned()] {
+    for title in [
+        String::new(),
+        "\u{754c}".repeat(201),
+        "before\0after".to_owned(),
+    ] {
         let response = test::call_service(
             &app,
             test::TestRequest::post()
@@ -188,7 +192,13 @@ async fn persistence_failures_are_safe_internal_errors_on_every_endpoint() {
     let failed = Arc::new(Container::with_providers(Providers {
         task_storage: Arc::new(InMemoryTaskStorageProvider::with_persistence_failure()),
     }));
-    let app = test::init_service(create_app_with_container(HttpConfig::default(), failed)).await;
+    let app = test::init_service(create_app_with_container(
+        HttpConfig::default(),
+        failed,
+        #[cfg(feature = "api-doc")]
+        environment::ApiDocConfig::new("docs", "documentation-test-password").unwrap(),
+    ))
+    .await;
     let path = format!("/v1/tasks/{}", Uuid::nil());
     for request in [
         test::TestRequest::post()

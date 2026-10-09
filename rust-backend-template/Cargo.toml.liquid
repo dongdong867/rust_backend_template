@@ -5,11 +5,25 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+api-doc = [
+  "dep:actix-web-httpauth",
+  "dep:subtle",
+  "dep:utoipa",
+  "dep:utoipa-swagger-ui",
+  "environment/api-doc",
+{% if include_tasks %}  "tasks/api-doc",
+{% endif %}]
+
 [dependencies]
 actix-cors.workspace = true
 actix-web.workspace = true
+actix-web-httpauth = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+subtle = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true, features = ["actix_extras"] }
+utoipa-swagger-ui = { workspace = true, optional = true }
 sqlx.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

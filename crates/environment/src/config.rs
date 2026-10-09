@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "api-doc")]
+use crate::ApiDocConfig;
 use crate::{ConfigError, CorsOrigin, DatabaseConfig, DatabaseUrl, HttpConfig, LogFormat};
 
 /// Validated, immutable settings for one process.
@@ -13,6 +15,8 @@ pub struct Config {
     pub log_format: LogFormat,
     pub http: HttpConfig,
     pub database: DatabaseConfig,
+    #[cfg(feature = "api-doc")]
+    pub api_doc: ApiDocConfig,
 }
 
 impl Config {
@@ -24,7 +28,11 @@ impl Config {
         })
     }
 
-    /// Reads each setting through `lookup`; DATABASE_URL is required, others have defaults.
+    /// Loads validated configuration from a supplied settings lookup.
+    ///
+    /// Uses the same validation and defaults as [`Self::from_env`] without reading
+    /// the process environment. Missing required settings and invalid supplied
+    /// values return a setting-named error.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         Self::from_try_lookup(|name| Ok(lookup(name)))
     }
@@ -63,8 +71,34 @@ impl Config {
             )?,
             http: read_http_config(&lookup)?,
             database: read_database_config(&lookup)?,
+            #[cfg(feature = "api-doc")]
+            api_doc: read_api_doc_config(&lookup)?,
         })
     }
+}
+
+#[cfg(feature = "api-doc")]
+fn read_api_doc_config(
+    lookup: &impl Fn(&'static str) -> Result<Option<String>, ConfigError>,
+) -> Result<ApiDocConfig, ConfigError> {
+    let username = secret_setting(
+        lookup,
+        "API_DOC_USERNAME",
+        Some("docs".to_owned()),
+        "a nonempty username without colon or control characters",
+        |value| ApiDocConfig::valid_username(value).then(|| value.to_owned()),
+    )?;
+
+    let password = secret_setting(
+        lookup,
+        "API_DOC_PASSWORD",
+        None,
+        "a nonempty password",
+        |value| (!value.is_empty()).then(|| value.to_owned()),
+    )?;
+
+    Ok(ApiDocConfig::new(&username, &password)
+        .expect("secret-setting validation guarantees valid credentials"))
 }
 
 fn read_database_config(
@@ -193,6 +227,128 @@ mod tests {
 
     const TEST_DATABASE_URL: &str = "postgres://localhost/environment_test";
 
+    #[cfg(feature = "api-doc")]
+    #[test]
+    fn api_doc_credentials_are_validated_and_redacted() {
+        for username in [
+            "",
+            "private:user",
+            "private\nuser",
+            "private\u{85}user",
+            "private\0user",
+        ] {
+            let error = load(&[("API_DOC_USERNAME", username)]).unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::InvalidSecret {
+                    name: "API_DOC_USERNAME",
+                    ..
+                }
+            ));
+            for rendered in [error.to_string(), format!("{error:?}")] {
+                assert!(rendered.contains("API_DOC_USERNAME"));
+                assert!(!rendered.contains("private"));
+            }
+        }
+    }
+
+    #[cfg(feature = "api-doc")]
+    #[test]
+    fn api_doc_defaults_required_password_and_exact_values() {
+        assert_eq!(load(&[]).unwrap().api_doc.username(), "docs");
+
+        let config = load(&[
+            ("API_DOC_USERNAME", " synthetic-user-\u{00e9} "),
+            ("API_DOC_PASSWORD", " synthetic-password:\n\u{1f642} "),
+        ])
+        .unwrap();
+        assert_eq!(config.api_doc.username(), " synthetic-user-\u{00e9} ");
+        assert_eq!(
+            config.api_doc.password(),
+            " synthetic-password:\n\u{1f642} "
+        );
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("synthetic-user"));
+        assert!(!debug.contains("synthetic-password"));
+
+        let missing = Config::from_lookup(|name| {
+            (name == "DATABASE_URL").then(|| TEST_DATABASE_URL.to_owned())
+        })
+        .unwrap_err();
+        assert_eq!(
+            missing,
+            ConfigError::Missing {
+                name: "API_DOC_PASSWORD"
+            }
+        );
+
+        let empty = load(&[("API_DOC_PASSWORD", "")]).unwrap_err();
+        assert!(matches!(
+            empty,
+            ConfigError::InvalidSecret {
+                name: "API_DOC_PASSWORD",
+                ..
+            }
+        ));
+        for rendered in [empty.to_string(), format!("{empty:?}")] {
+            assert!(rendered.contains("API_DOC_PASSWORD"));
+            assert!(!rendered.contains("synthetic"));
+        }
+    }
+
+    #[cfg(feature = "api-doc")]
+    #[test]
+    fn api_doc_settings_are_read_once_and_nonunicode_errors_are_safe() {
+        use std::cell::RefCell;
+
+        let calls = RefCell::new(HashMap::new());
+        Config::from_lookup(|name| {
+            *calls.borrow_mut().entry(name.to_owned()).or_insert(0) += 1;
+            match name {
+                "DATABASE_URL" => Some(TEST_DATABASE_URL.to_owned()),
+                "API_DOC_PASSWORD" => Some("synthetic-pass".to_owned()),
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert_eq!(calls.borrow()["API_DOC_USERNAME"], 1);
+        assert_eq!(calls.borrow()["API_DOC_PASSWORD"], 1);
+
+        for setting in ["API_DOC_USERNAME", "API_DOC_PASSWORD"] {
+            let error = Config::from_try_lookup(|name| {
+                if name == setting {
+                    Err(ConfigError::NotUnicode { name })
+                } else if name == "DATABASE_URL" {
+                    Ok(Some(TEST_DATABASE_URL.to_owned()))
+                } else {
+                    Ok(None)
+                }
+            })
+            .unwrap_err();
+            assert_eq!(error, ConfigError::NotUnicode { name: setting });
+        }
+    }
+
+    #[cfg(not(feature = "api-doc"))]
+    #[test]
+    fn api_doc_settings_are_never_read_when_disabled() {
+        for value in [None, Some(""), Some("invalid:\u{85}credential")] {
+            Config::from_lookup(|name| {
+                assert!(!name.starts_with("API_DOC_"));
+                if name == "DATABASE_URL" {
+                    Some(TEST_DATABASE_URL.to_owned())
+                } else {
+                    value
+                        .map(str::to_owned)
+                        .filter(|_| name.starts_with("API_DOC_"))
+                }
+            })
+            .unwrap();
+            assert!(load(&[("API_DOC_USERNAME", "invalid:\n"), ("API_DOC_PASSWORD", "")]).is_ok());
+        }
+    }
+
     fn test_database_config() -> DatabaseConfig {
         DatabaseConfig {
             url: DatabaseUrl::parse(TEST_DATABASE_URL).unwrap(),
@@ -207,6 +363,9 @@ mod tests {
             .collect();
         vars.entry("DATABASE_URL".to_owned())
             .or_insert_with(|| TEST_DATABASE_URL.to_owned());
+        #[cfg(feature = "api-doc")]
+        vars.entry("API_DOC_PASSWORD".to_owned())
+            .or_insert_with(|| "synthetic-pass".to_owned());
         Config::from_lookup(|name| vars.get(name).cloned())
     }
 
@@ -351,6 +510,8 @@ mod tests {
                 log_filter: "info".to_owned(),
                 log_format: LogFormat::Pretty,
                 database: test_database_config(),
+                #[cfg(feature = "api-doc")]
+                api_doc: ApiDocConfig::new("docs", "synthetic-pass").unwrap(),
                 http: HttpConfig {
                     cors_enabled: true,
                     cors_allowed_origins: Vec::new(),
@@ -384,6 +545,8 @@ mod tests {
                 log_filter: "debug,actix_server=warn".to_owned(),
                 log_format: LogFormat::Json,
                 database: test_database_config(),
+                #[cfg(feature = "api-doc")]
+                api_doc: ApiDocConfig::new("docs", "synthetic-pass").unwrap(),
                 http: HttpConfig {
                     cors_enabled: false,
                     cors_allowed_origins: vec![
@@ -508,7 +671,12 @@ mod tests {
         let calls = RefCell::new(HashMap::new());
         Config::from_try_lookup(|name| {
             *calls.borrow_mut().entry(name.to_owned()).or_insert(0) += 1;
-            Ok((name == "DATABASE_URL").then(|| TEST_DATABASE_URL.to_owned()))
+            Ok(match name {
+                "DATABASE_URL" => Some(TEST_DATABASE_URL.to_owned()),
+                #[cfg(feature = "api-doc")]
+                "API_DOC_PASSWORD" => Some("synthetic-pass".to_owned()),
+                _ => None,
+            })
         })
         .unwrap();
         assert_eq!(calls.borrow()["DATABASE_URL"], 1);

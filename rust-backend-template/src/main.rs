@@ -16,7 +16,14 @@ fn main() -> ExitCode {
 
     let result = actix_web::rt::System::new().block_on(async {
         let container = Arc::new(Container::new(&config.database)?);
-        let result = server::run(config.port, config.http, container.clone()).await;
+        let result = server::run(
+            config.port,
+            config.http,
+            container.clone(),
+            #[cfg(feature = "api-doc")]
+            config.api_doc,
+        )
+        .await;
         container.shutdown().await;
         result
     });

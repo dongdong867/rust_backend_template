@@ -12,6 +12,55 @@ use serde_json::Value;
 const BINARY: &str = env!("CARGO_BIN_EXE_rust-backend-template");
 const WAIT: Duration = Duration::from_secs(10);
 
+#[cfg(feature = "api-doc")]
+#[test]
+fn documentation_credentials_fail_startup_safely_when_missing_or_invalid() {
+    for (username, password, setting) in [
+        (None, None, "API_DOC_PASSWORD"),
+        (None, Some(""), "API_DOC_PASSWORD"),
+        (
+            Some("private:user"),
+            Some("PRIVATE_PASSWORD"),
+            "API_DOC_USERNAME",
+        ),
+        (Some(""), Some("PRIVATE_PASSWORD"), "API_DOC_USERNAME"),
+    ] {
+        let mut command = Command::new(BINARY);
+        command
+            .env_clear()
+            .env("DATABASE_URL", "postgres://localhost/documentation_test");
+        if let Some(value) = username {
+            command.env("API_DOC_USERNAME", value);
+        }
+        if let Some(value) = password {
+            command.env("API_DOC_PASSWORD", value);
+        }
+        let mut child = command
+            .env("PORT", "0")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + WAIT;
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("invalid documentation credentials did not stop startup within {WAIT:?}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(setting), "{stderr}");
+        for text in [stderr, String::from_utf8(output.stdout).unwrap()] {
+            assert!(!text.contains("private"));
+            assert!(!text.contains("PRIVATE_PASSWORD"));
+        }
+    }
+}
+
 /// A running service that is killed if a test ends early.
 struct Service {
     child: Child,
@@ -26,6 +75,7 @@ impl Service {
             .env("LOG_FORMAT", "json")
             .env("RUST_LOG", "info")
             .env("DATABASE_URL", "postgres://localhost/process_test")
+            .env("API_DOC_PASSWORD", "documentation-test-password")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
