@@ -200,6 +200,24 @@ def check_input_failures(executable, source, destination):
     print("Name collision guards and explicit command consent passed.", flush=True)
 
 
+def check_generated(project, *, fast_only=False, structure_only=False):
+    """Exercise both compiled modes with cache reuse, not operator application settings."""
+    if structure_only:
+        return
+    environment = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target/template-test"))
+    # Keep TEST_DATABASE_URL: it deliberately selects the dedicated test server.
+    for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL",
+                    "DATABASE_MAX_CONNECTIONS", "PORT", "RUST_LOG", "LOG_FORMAT",
+                    "HTTP_CORS_ENABLED", "HTTP_CORS_ALLOWED_ORIGINS",
+                    "HTTP_REQUEST_TIMEOUT_SECS", "HTTP_REQUEST_BODY_LIMIT_BYTES"):
+        environment.pop(setting, None)
+    targets = ["lint", "test"] if fast_only else ["check"]
+    for feature in ("", "api-doc"):
+        command = ["make", *targets, f"FEATURES={feature}"]
+        print("+", " ".join(command), flush=True)
+        subprocess.run(command, cwd=project, env=environment, check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     checks = parser.add_mutually_exclusive_group()
@@ -226,17 +244,15 @@ def main():
             name = "generated-with-example" if include_tasks else "generated-without-example"
             project = generate(executable, source, temporary / "variants", name, include_tasks)
             check_project(project, name, include_tasks)
-            if not args.structure_only:
-                # Share build cache, not manifests/locks or generated source, across variants.
-                environment = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target/template-test"))
-                command = ["make", "lint", "test"] if args.fast_only else ["make", "check"]
-                subprocess.run(command, cwd=project, env=environment, check=True)
+            check_generated(project, fast_only=args.fast_only,
+                            structure_only=args.structure_only)
     if args.structure_only:
         print("Generation structure and locked metadata passed; full make check was NOT run.")
     elif args.fast_only:
-        print("Template twins, generation, lint and fast tests passed; PostgreSQL checks were NOT run.")
+        print("Both generated variants passed default and api-doc lint and fast tests; "
+              "PostgreSQL checks were NOT run.")
     else:
-        print("Template twins and both generated variants passed full make check.")
+        print("Template twins and both generated variants passed default and api-doc full make check.")
 
 
 if __name__ == "__main__":

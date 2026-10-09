@@ -62,7 +62,11 @@ mod tests {
     #[actix_web::test]
     async fn configured_composition_owns_a_lazy_pool_and_closes_it_on_shutdown() {
         let config = Config::from_lookup(|name| {
-            (name == "DATABASE_URL").then(|| "postgres://localhost/container_test".to_owned())
+            (name == "DATABASE_URL")
+                .then(|| "postgres://localhost/container_test".to_owned())
+                .or_else(|| {
+                    (name == "API_DOC_PASSWORD").then(|| "documentation-test-password".to_owned())
+                })
         })
         .unwrap();
         let container = Container::new(&config.database).unwrap();
@@ -75,7 +79,11 @@ mod tests {
     #[actix_web::test]
     async fn supplied_providers_keep_their_external_resources_caller_owned() {
         let config = Config::from_lookup(|name| {
-            (name == "DATABASE_URL").then(|| "postgres://localhost/container_test".to_owned())
+            (name == "DATABASE_URL")
+                .then(|| "postgres://localhost/container_test".to_owned())
+                .or_else(|| {
+                    (name == "API_DOC_PASSWORD").then(|| "documentation-test-password".to_owned())
+                })
         })
         .unwrap();
         let database = create_pool(&config.database).unwrap();

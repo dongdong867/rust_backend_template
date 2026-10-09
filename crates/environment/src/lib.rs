@@ -7,4 +7,6 @@ pub(crate) mod setting;
 
 pub use config::Config;
 pub use config_error::ConfigError;
+#[cfg(feature = "api-doc")]
+pub use setting::ApiDocConfig;
 pub use setting::{CorsOrigin, DatabaseConfig, DatabaseUrl, HttpConfig, LogFormat};

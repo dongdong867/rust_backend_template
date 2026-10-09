@@ -7,6 +7,8 @@ use actix_web::error::JsonPayloadError;
 use actix_web::middleware::{Condition, ErrorHandlers, from_fn};
 use actix_web::{App, Error, web};
 use environment::HttpConfig;
+#[cfg(feature = "api-doc")]
+use environment::ApiDocConfig;
 
 use crate::api::error::ProblemDetails;
 use crate::api::middleware::request_id::request_id;
@@ -20,6 +22,7 @@ use crate::api::route::health::config_health_routes;
 pub fn create_app(
     http_config: HttpConfig,
     {% if include_tasks %}container{% else %}_container{% endif %}: Arc<Container>,
+    #[cfg(feature = "api-doc")] api_doc_config: ApiDocConfig,
 ) -> App<
     impl ServiceFactory<
         ServiceRequest,
@@ -39,6 +42,7 @@ pub fn create_app(
         })
         .allow_any_method()
         .allow_any_header();
+
     let json_config = web::JsonConfig::default()
         .limit(http_config.request_body_limit)
         .error_handler(|error, _request| {
@@ -55,7 +59,7 @@ pub fn create_app(
             error.into()
         });
 
-    App::new()
+    let app = App::new()
         // Shared extractor and middleware state.
 {% if include_tasks %}        .app_data(web::Data::from(container.task_controller.clone()))
 {% endif %}        .app_data(web::Data::new(http_config.clone()))
@@ -68,5 +72,10 @@ pub fn create_app(
         .wrap(SecurityHeaders::middleware())
         .wrap(from_fn(request_id))
         .configure(config_health_routes)
-{% if include_tasks %}        .configure(config_task_routes)
-{% endif %}}
+{% if include_tasks %}        .configure(config_task_routes){% endif %};
+
+    #[cfg(feature = "api-doc")]
+    let app = app.service(crate::swagger::documentation_scope(api_doc_config));
+
+    app
+}

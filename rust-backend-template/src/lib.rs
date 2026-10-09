@@ -4,4 +4,6 @@ pub mod create_app;
 pub mod database;
 pub mod providers;
 pub mod server;
+#[cfg(feature = "api-doc")]
+pub(crate) mod swagger;
 pub mod telemetry;

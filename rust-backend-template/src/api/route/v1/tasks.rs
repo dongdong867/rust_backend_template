@@ -21,6 +21,19 @@ pub fn config_task_routes(config: &mut web::ServiceConfig) {
     );
 }
 
+#[cfg_attr(feature = "api-doc", utoipa::path(
+    post,
+    path = "/v1/tasks",
+    tag = "Tasks",
+    request_body = CreateTaskRequest,
+    responses(
+        (status = 201, description = "Task created", body = tasks::adapter::dto::TaskResponse),
+        (status = 400, description = "Invalid title or request body", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 413, description = "Request body exceeds the configured limit", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 500, description = "Task could not be persisted", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 504, description = "Request timed out", body = ProblemDetails, content_type = "application/problem+json")
+    )
+))]
 async fn create_task(
     controller: web::Data<dyn TaskController>,
     body: web::Json<CreateTaskRequest>,
@@ -31,6 +44,19 @@ async fn create_task(
     }
 }
 
+#[cfg_attr(feature = "api-doc", utoipa::path(
+    get,
+    path = "/v1/tasks/{id}",
+    tag = "Tasks",
+    params(("id" = Uuid, Path, description = "Task identifier")),
+    responses(
+        (status = 200, description = "Task found", body = tasks::adapter::dto::TaskResponse),
+        (status = 400, description = "Invalid task identifier", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "Task not found", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 500, description = "Task could not be retrieved", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 504, description = "Request timed out", body = ProblemDetails, content_type = "application/problem+json")
+    )
+))]
 async fn get_task(controller: web::Data<dyn TaskController>, id: web::Path<Uuid>) -> HttpResponse {
     match controller.get_task(id.into_inner()).await {
         Ok(task) => HttpResponse::Ok().json(task),
@@ -38,6 +64,20 @@ async fn get_task(controller: web::Data<dyn TaskController>, id: web::Path<Uuid>
     }
 }
 
+#[cfg_attr(feature = "api-doc", utoipa::path(
+    post,
+    path = "/v1/tasks/{id}/complete",
+    tag = "Tasks",
+    params(("id" = Uuid, Path, description = "Task identifier")),
+    responses(
+        (status = 200, description = "Task completed", body = tasks::adapter::dto::TaskResponse),
+        (status = 400, description = "Invalid task identifier", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 404, description = "Task not found", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 409, description = "Task is already completed", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 500, description = "Task could not be completed", body = ProblemDetails, content_type = "application/problem+json"),
+        (status = 504, description = "Request timed out", body = ProblemDetails, content_type = "application/problem+json")
+    )
+))]
 async fn complete_task(
     controller: web::Data<dyn TaskController>,
     id: web::Path<Uuid>,

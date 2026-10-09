@@ -12,7 +12,11 @@ use tasks::framework::storage::PostgresTaskStorageProvider;
 #[actix_web::test]
 async fn the_shared_pool_is_lazy_and_health_never_acquires_a_connection() {
     let config = Config::from_lookup(|name| {
-        (name == "DATABASE_URL").then(|| "postgres://localhost/pool_test".to_owned())
+        (name == "DATABASE_URL")
+            .then(|| "postgres://localhost/pool_test".to_owned())
+            .or_else(|| {
+                (name == "API_DOC_PASSWORD").then(|| "documentation-test-password".to_owned())
+            })
     })
     .unwrap();
     let database = create_pool(&config.database).unwrap();
@@ -21,7 +25,13 @@ async fn the_shared_pool_is_lazy_and_health_never_acquires_a_connection() {
         task_storage: provider,
     }));
     assert_eq!(database.size(), 0);
-    let app = test::init_service(create_app(config.http, container)).await;
+    let app = test::init_service(create_app(
+        config.http,
+        container,
+        #[cfg(feature = "api-doc")]
+        config.api_doc,
+    ))
+    .await;
     let response =
         test::call_service(&app, test::TestRequest::get().uri("/health").to_request()).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -33,9 +43,14 @@ async fn the_shared_pool_is_lazy_and_health_never_acquires_a_connection() {
 #[actix_web::test]
 async fn invalid_connection_options_do_not_escape_in_startup_errors() {
     let config = Config::from_lookup(|name| {
-        (name == "DATABASE_URL").then(|| {
-            "postgres://user:secret-password@localhost/db?sslmode=secret-invalid-mode".to_owned()
-        })
+        (name == "DATABASE_URL")
+            .then(|| {
+                "postgres://user:secret-password@localhost/db?sslmode=secret-invalid-mode"
+                    .to_owned()
+            })
+            .or_else(|| {
+                (name == "API_DOC_PASSWORD").then(|| "documentation-test-password".to_owned())
+            })
     })
     .unwrap();
     let error = create_pool(&config.database).unwrap_err();

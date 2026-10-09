@@ -152,7 +152,7 @@ async fn rejects_changes_to_immutable_fields_in_provider_output() {
 #[tokio::test]
 async fn malformed_records_are_opaque() {
     let mut invalid = Vec::new();
-    for title in ["".to_owned(), "界".repeat(201), "a\0b".into()] {
+    for title in ["".to_owned(), "\u{754c}".repeat(201), "a\0b".into()] {
         let mut row = record();
         row.title = title;
         invalid.push(row);

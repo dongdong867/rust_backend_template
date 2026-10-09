@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -80,6 +81,55 @@ class TemplateChecksTest(unittest.TestCase):
         ]}).encode()
         with patch.object(template_test.subprocess, "check_output", return_value=metadata):
             template_test.check_project(self.output, "generated", include_tasks)
+
+    def test_generated_check_matrix(self):
+        for fast_only in (False, True):
+            with self.subTest(fast_only=fast_only), patch.object(
+                template_test.subprocess, "run"
+            ) as run, patch.dict(os.environ, {
+                "API_DOC_USERNAME": "operator",
+                "API_DOC_PASSWORD": "synthetic-inherited-secret",
+                "DATABASE_URL": "synthetic-application-database",
+                "PORT": "4321",
+            }):
+                for project in (self.source, self.output):
+                    template_test.check_generated(project, fast_only=fast_only)
+                targets = ["lint", "test"] if fast_only else ["check"]
+                self.assertEqual(
+                    [call.args[0] for call in run.call_args_list],
+                    [["make", *targets, f"FEATURES={feature}"]
+                     for _ in range(2) for feature in ("", "api-doc")],
+                )
+                for call in run.call_args_list:
+                    self.assertTrue(call.kwargs["check"])
+                    for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL", "PORT"):
+                        self.assertFalse(setting in call.kwargs["env"], setting)
+                    self.assertEqual(call.kwargs["env"]["CARGO_TARGET_DIR"],
+                                     str(template_test.ROOT / "target/template-test"))
+                self.assertEqual([call.kwargs["cwd"] for call in run.call_args_list],
+                                 [self.source, self.source, self.output, self.output])
+
+    def test_structure_only_does_not_run_make(self):
+        with patch.object(template_test.subprocess, "run") as run:
+            template_test.check_generated(self.output, structure_only=True)
+        run.assert_not_called()
+
+    def test_make_feature_flags(self):
+        result = subprocess.check_output(
+            ["make", "-n", "run", "migrate", "build", "test", "test-db", "FEATURES=api-doc"],
+            cwd=template_test.ROOT, env=dict(os.environ, TEST_DATABASE_URL="synthetic"),
+            text=True,
+        )
+        cargo_commands = [line for line in result.splitlines()
+                          if "cargo run" in line or "cargo build" in line or "cargo test" in line]
+        self.assertEqual(len(cargo_commands), 6)
+        for command in cargo_commands:
+            arguments = shlex.split(command)
+            self.assertEqual(arguments[arguments.index("--features") + 1], "api-doc")
+        default = subprocess.check_output(["make", "-n", "test", "FEATURES="], cwd=template_test.ROOT,
+                                          text=True)
+        self.assertNotIn("--features", default)
+        self.assertNotIn("postgres_database", default)
 
     def test_matching_canonical_twin_passes(self):
         self.write(self.source, "file.rs", "source\n")

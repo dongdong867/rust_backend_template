@@ -2,7 +2,9 @@
 
 TAPLO_VERSION := 0.10.0
 {% if template_source %}CARGO_GENERATE_VERSION := 0.25.0
-{% endif %}
+{% endif %}FEATURES ?=
+CARGO_FEATURES = $(if $(strip $(FEATURES)),--features "$(FEATURES)")
+
 .DEFAULT_GOAL := help
 .PHONY: help run migrate build test test-db {% if template_source %}template-test template-tools {% endif %}fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version
 
@@ -10,22 +12,22 @@ help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 run: ## Run the service, loading .env when it exists
-	set -a; [ ! -f .env ] || . ./.env; set +a; cargo run --locked
+	set -a; [ ! -f .env ] || . ./.env; set +a; cargo run --locked $(CARGO_FEATURES)
 
 migrate: ## Apply PostgreSQL migrations deliberately, loading .env when it exists
-	set -a; [ ! -f .env ] || . ./.env; set +a; cargo run --locked --bin migrate
+	set -a; [ ! -f .env ] || . ./.env; set +a; cargo run --locked $(CARGO_FEATURES) --bin migrate
 
 build: ## Build the release binary
-	cargo build --locked --release
+	cargo build --locked --release $(CARGO_FEATURES)
 
 test: ## Run fast tests without PostgreSQL
-	cargo test --locked --workspace
+	cargo test --locked --workspace $(CARGO_FEATURES)
 {% if template_source %}	python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 {% endif %}
 test-db: ## Run real SQL tests on an existing server (requires TEST_DATABASE_URL)
 	@test -n "$${TEST_DATABASE_URL:-}" || { echo "TEST_DATABASE_URL is required; use a dedicated PostgreSQL test server with CREATEDB permission." >&2; exit 1; }
-	@cargo test --locked -p {{project-name}} --test postgres_database -- --ignored
-{% if include_tasks %}	@DATABASE_URL="$$TEST_DATABASE_URL" cargo test --locked -p tasks --test postgres_task_repository -- --ignored
+	@cargo test --locked -p {{project-name}} $(CARGO_FEATURES) --test postgres_database -- --ignored
+{% if include_tasks %}	@DATABASE_URL="$$TEST_DATABASE_URL" cargo test --locked -p tasks $(CARGO_FEATURES) --test postgres_task_repository -- --ignored
 {% endif %}
 {% if template_source %}template-test: ## Generate both variants and run their full checks (requires TEST_DATABASE_URL)
 	python3 scripts/template_test.py

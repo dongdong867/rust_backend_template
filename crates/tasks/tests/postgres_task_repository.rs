@@ -24,7 +24,7 @@ async fn postgres_provider_rejects_invalid_input_and_returns_actual_rows(pool: P
     let provider = PostgresTaskStorageProvider::new(pool.clone());
     let record = TaskStorageRecord {
         id: Uuid::new_v4(),
-        title: "  界\n ".into(),
+        title: "  \u{754c}\n ".into(),
         status: "open".into(),
         created_at: Utc::now(),
         completed_at: None,
@@ -35,7 +35,7 @@ async fn postgres_provider_rejects_invalid_input_and_returns_actual_rows(pool: P
             ..record.clone()
         },
         TaskStorageRecord {
-            title: "界".repeat(201),
+            title: "\u{754c}".repeat(201),
             ..record.clone()
         },
         TaskStorageRecord {
@@ -129,10 +129,10 @@ async fn postgres_task_repository_contract(pool: PgPool) {
         PostgresTaskStorageProvider::new(pool.clone()),
     )));
     let task = repository
-        .create(Task::new("  界\n ".into()).unwrap())
+        .create(Task::new("  \u{754c}\n ".into()).unwrap())
         .await
         .unwrap();
-    assert_eq!(task.title(), "  界\n ");
+    assert_eq!(task.title(), "  \u{754c}\n ");
     assert_eq!(task.status(), TaskStatus::Open);
     assert!(task.completed_at().is_none());
     assert_eq!(repository.get(task.id()).await.unwrap(), task);
@@ -244,7 +244,7 @@ async fn postgres_task_repository_contract(pool: PgPool) {
     // Database constraints protect the same invariants even outside the application.
     for (title, status, completed_at) in [
         ("".to_owned(), "open", None),
-        ("界".repeat(201), "open", None),
+        ("\u{754c}".repeat(201), "open", None),
         ("valid".to_owned(), "unknown", None),
         ("valid".to_owned(), "completed", None),
         ("valid".to_owned(), "open", Some(Utc::now())),
@@ -268,7 +268,7 @@ async fn postgres_task_repository_contract(pool: PgPool) {
         ));
     }
     let boundary = repository
-        .create(Task::new("界".repeat(200)).unwrap())
+        .create(Task::new("\u{754c}".repeat(200)).unwrap())
         .await
         .unwrap();
     assert_eq!(boundary.title().chars().count(), 200);
