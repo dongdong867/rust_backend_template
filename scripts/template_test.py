@@ -113,6 +113,22 @@ def check_twins(source, canonical):
         )
 
 
+def check_ci_files(project, source=ROOT):
+    """Only plain shared configs survive generation; source tooling never does."""
+    for name in (".github/workflows/format.yml", ".github/dependabot.yml"):
+        generated = project / name
+        require(generated.is_file(), f"CI configuration missing: {name}.")
+        require(generated.read_bytes() == (source / name).read_bytes(),
+                f"CI configuration changed during generation: {name}.")
+    require(not (project / ".github/workflows/template-ci.yml").exists(),
+            "Source-only workflow leaked into generated service.")
+    makefile = (project / "Makefile").read_text()
+    for target in ("template-test", "template-test-fast", "template-tools",
+                   "ci-tools", "ci-config-check"):
+        require(not re.search(rf"^{re.escape(target)}:", makefile, re.MULTILINE),
+                f"Source-only Make target leaked: {target}.")
+
+
 def check_project(project, name, include_tasks):
     service = project / name
     require(service.is_dir(), f"Service folder was not renamed to {name}.")
@@ -121,6 +137,7 @@ def check_project(project, name, include_tasks):
     link = project / "CLAUDE.md"
     require(link.is_symlink() and os.readlink(link) == "AGENTS.md" and link.is_file(),
             "CLAUDE.md must be a working relative symlink to AGENTS.md.")
+    check_ci_files(project)
     for path in (".ddlc", ".delta", ".tools", ".env", "target", ".template",
                  "scripts", "cargo-generate.toml", ".genignore"):
         require(not (project / path).exists(), f"Generator-only or local path leaked: {path}.")

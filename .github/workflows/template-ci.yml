@@ -1,0 +1,64 @@
+name: Template validation
+
+on:
+  pull_request:
+    # Converting to draft cancels an older heavy run; its replacement job is skipped.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Source and generated variants
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Read project tool pins
+        id: tools
+        run: make --no-print-directory tool-versions >> "$GITHUB_OUTPUT"
+      - name: Install pinned Rust from rust-toolchain.toml
+        run: rustup show active-toolchain
+      - name: Install prebuilt Taplo
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: taplo@${{ steps.tools.outputs.taplo }}
+          fallback: none
+      - name: Restore optional build cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          # Never cache credential/configuration files or application environments.
+          # Cargo install records must accompany the restored generator binary.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            .tools/bin
+            .tools/.crates.toml
+            .tools/.crates2.json
+          key: template-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Makefile', 'scripts/install_actionlint.py') }}
+      - name: Install source verification tools
+        run: make ci-tools template-tools
+      - name: Validate actual workflow syntax
+        run: make ci-config-check
+      - name: Check main formatting
+        if: github.event_name == 'push'
+        run: make fmt-check fmt-toml-check
+      - name: Clippy for all targets and features
+        run: make clippy
+      - name: Default compilation and fast tests
+        run: make test FEATURES=
+      - name: API documentation compilation and fast tests
+        run: make test FEATURES=api-doc
+      - name: Both generated variants and feature modes
+        run: make template-test-fast

@@ -3,6 +3,8 @@
 /.tools/
 /target/
 /scripts/
+# Generated services retain only the shared, budget-conscious PR formatting workflow.
+/.github/workflows/template-ci.yml
 *.env
 .env*
 !.example.env

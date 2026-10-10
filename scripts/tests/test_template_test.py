@@ -64,6 +64,9 @@ class TemplateChecksTest(unittest.TestCase):
             "generated/tests/postgres_database.rs",
         ):
             self.write(self.output, path)
+        for path in (".github/workflows/format.yml", ".github/dependabot.yml"):
+            self.write(self.output, path, (template_test.ROOT / path).read_text())
+        self.write(self.output, "Makefile", "test:\n\tcargo test --locked\n")
         self.write(self.output, ".example.env", "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n")
         self.write(self.output, template_test.WORKFLOW_PROBE, template_test.WORKFLOW_TEXT)
         (self.output / "CLAUDE.md").symlink_to("AGENTS.md")
