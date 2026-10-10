@@ -2,11 +2,12 @@
 
 TAPLO_VERSION := 0.10.0
 CARGO_GENERATE_VERSION := 0.25.0
+ACTIONLINT_VERSION := 1.7.12
 FEATURES ?=
 CARGO_FEATURES = $(if $(strip $(FEATURES)),--features "$(FEATURES)")
 
 .DEFAULT_GOAL := help
-.PHONY: help run migrate build test test-db template-test template-tools fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version
+.PHONY: help run migrate build test test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -32,8 +33,20 @@ test-db: ## Run real SQL tests on an existing server (requires TEST_DATABASE_URL
 template-test: ## Generate both variants and run their full checks (requires TEST_DATABASE_URL)
 	python3 scripts/template_test.py
 
+template-test-fast: ## Generate both variants and run lint and fast tests without PostgreSQL
+	python3 scripts/template_test.py --fast-only
+
 template-tools: ## Install the pinned generator locally for template verification
 	cargo install --locked --version $(CARGO_GENERATE_VERSION) --root .tools cargo-generate
+
+ci-tools: ## Install the pinned workflow checker locally with checksum verification
+	python3 scripts/install_actionlint.py --version $(ACTIONLINT_VERSION)
+
+ci-config-check: ci-tools ## Check the actual GitHub Actions workflows
+	.tools/bin/actionlint -shellcheck= -pyflakes= .github/workflows/*.yml
+
+tool-versions: ## Print tool pins for CI without duplicating versions in workflows
+	@printf 'taplo=%s\ncargo-generate=%s\nactionlint=%s\n' '$(TAPLO_VERSION)' '$(CARGO_GENERATE_VERSION)' '$(ACTIONLINT_VERSION)'
 
 fmt: taplo-version ## Format Rust and TOML files
 	cargo fmt --all

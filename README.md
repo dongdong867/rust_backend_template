@@ -18,8 +18,10 @@ Generation runs Cargo and requires Unix `ln` for the agent-instructions symlink;
 
 Template maintainers run `TEST_DATABASE_URL=postgres://localhost/postgres make template-test` to check the Liquid twins and fully verify both generated variants, each with default features and `api-doc`.
 This requires the dedicated test server described under [Develop](#develop).
-`python3 scripts/template_test.py --fast-only` runs the same feature matrix without database checks.
+`make template-test-fast` wraps `python3 scripts/template_test.py --fast-only` to run the same feature matrix without database checks.
 `--structure-only` checks generation and locked metadata only; it does not run lint or tests.
+`make ci-tools` installs checksum-verified actionlint 1.7.12 under `.tools/bin`; `make ci-config-check` checks the actual workflow files with it.
+Rust is pinned in `rust-toolchain.toml`; Taplo and cargo-generate are pinned in `Makefile`.
 
 ## Run it
 
@@ -126,6 +128,28 @@ Use a **dedicated test server**, not production. Its role needs `CREATEDB` permi
 Database tests create isolated databases and may leave failed-test databases or harness bookkeeping for inspection.
 They require `TEST_DATABASE_URL`; no command starts PostgreSQL automatically.
 The pre-commit hook remains database-free.
+
+## GitHub automation
+
+The plain `.github/workflows/format.yml` is retained in both the template source and generated services.
+It checks Rust and TOML formatting when a pull request is opened, updated or reopened, including drafts.
+Private-repository formatting installs pinned prebuilt Taplo rather than compiling it.
+
+The source-only `.github/workflows/template-ci.yml` is excluded from generation by `.genignore`.
+It runs Clippy and fast tests with default features and `api-doc`, plus database-free checks of both generated variants, on reviewable pull requests and pushes to `main`.
+Source drafts run formatting only: `ready_for_review` starts heavy validation, and `converted_to_draft` cancels it.
+Generated services retain formatting-only defaults regardless of repository visibility, with no `main`-push automation.
+CI does not replace full `make check` (default and `FEATURES=api-doc`) or `make template-test`; these still require the existing dedicated `TEST_DATABASE_URL` server.
+
+Pull request workflows use read-only `pull_request` permissions, optional caches, and no production secrets or databases.
+For public repositories, in **Settings > Actions > General**, select **Require approval for all external contributors** for workflows from fork pull requests.
+For private repositories with fork workflows enabled, the corresponding approval policy covers fork contributors without write permission, not trusted collaborators' own pull requests.
+Repository approval settings are not copied by generation; configure the applicable policy separately. This documentation change does not change GitHub settings.
+Dependabot opens weekly grouped Cargo and GitHub Actions dependency proposals; auto-merge is not enabled.
+
+See **Actions > workflow run > job** for actual elapsed job time.
+Repository or organization **Settings > Billing and licensing > Usage** shows billed Actions minutes (billing access is required).
+Elapsed time and billed minutes differ; there are no runtime guarantees.
 
 ## Changing the service
 
