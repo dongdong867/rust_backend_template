@@ -1,0 +1,103 @@
+name: CI command worker
+run-name: ci-command ${{ inputs.pr }} ${{ inputs.command }} ${{ inputs.sha }} ${{ inputs.request }} ${{ inputs.controller }} ${{ inputs.base }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Internal PR number; request checks using a PR comment
+        required: true
+        type: string
+      command:
+        description: Internal validated command
+        required: true
+        type: string
+      sha:
+        description: Captured PR head SHA
+        required: true
+        type: string
+      request:
+        description: Accepted comment ID
+        required: true
+        type: string
+      controller:
+        description: Accepting controller run ID
+        required: true
+        type: string
+      base:
+        description: Trusted worker workflow commit
+        required: true
+        type: string
+
+# No repository write token, application secrets, persisted credentials or shared caches.
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  validate:
+    name: Validate accepted request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate against trusted request state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMAND_INPUTS: ${{ toJson(inputs) }}
+        run: python3 .github/ci/comment_ci.py worker-check
+
+  execute:
+    name: Run PR command
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # No automatic admission cancellation: only the controller cancels known obsolete owners.
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Revalidate after waiting for execution
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMAND_INPUTS: ${{ toJson(inputs) }}
+        run: python3 .github/ci/comment_ci.py worker-check
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.sha }}
+          path: pr
+          persist-credentials: false
+      - name: Confirm exact captured checkout
+        working-directory: pr
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Read tool pins for lint only
+        if: inputs.command == 'lint'
+        working-directory: pr
+        id: tools
+        run: make --no-print-directory tool-versions >> "$GITHUB_OUTPUT"
+      - name: Install pinned Rust from the PR toolchain
+        working-directory: pr
+        run: rustup show active-toolchain
+      - name: Install prebuilt Taplo for lint only
+        if: inputs.command == 'lint'
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: taplo@${{ steps.tools.outputs.taplo }}
+          fallback: none
+      - name: Run only the requested Make targets
+        working-directory: pr
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: python3 ../trusted/.github/ci/comment_ci.py execute
