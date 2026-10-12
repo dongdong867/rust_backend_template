@@ -112,6 +112,9 @@ make lint            # Rust/TOML formatting and Clippy; no PostgreSQL
 make help            # every target
 ```
 
+For package-only tests, use `make test-crate CRATE=environment`, optionally with `FEATURES=api-doc`.
+`CRATE` must exactly name a workspace Cargo package; an unknown name never falls back to workspace tests.
+
 After changing repository SQL, migrations, database types or concurrency behavior, run:
 
 ```sh
@@ -150,6 +153,38 @@ Dependabot opens weekly grouped Cargo and GitHub Actions dependency proposals; a
 See **Actions > workflow run > job** for actual elapsed job time.
 Repository or organization **Settings > Billing and licensing > Usage** shows billed Actions minutes (billing access is required).
 Elapsed time and billed minutes differ; there are no runtime guarantees.
+
+### Maintainer-requested checks
+
+On an open pull request, create a comment containing exactly one command:
+
+| Command | Work | Result |
+|---|---|---|
+| `/lint` | `make lint` | Lint status |
+| `/test` | `make test` with default features and `api-doc` | Full-test status: `ci-comment /test` |
+| `/test-{crate}` | One workspace package's default tests and `api-doc` when it declares that feature | Separate partial-test status |
+
+For example, `/test-environment` tests the configuration package; `/test-rust-backend-template` tests the service package.
+Use Cargo package names, not Rust import names, directories, arguments or wildcards.
+These checks are database-free; partial runs compile dependencies but do not run other packages' suites.
+There are no additional comment commands.
+
+The commenter needs repository write, maintain or admin permission; association labels alone are not authorization.
+Comments on issues, edits, extra whitespace and unauthorized commands do not dispatch workers or write statuses.
+Each accepted command captures the current head SHA. A new commit needs a new `/test`; an earlier SHA's result cannot satisfy it.
+Another identical command supersedes its earlier run, while different commands, packages and PRs execute independently.
+When PRs share a head SHA, their commit status is shared: only the newest accepted request for that SHA and command can update it.
+Repeat checks with a new comment, not **Re-run jobs** or manual worker dispatch.
+Cancellation and timeout are nonpassing status errors.
+
+Both command workflows and `.github/ci/` helpers are retained in generated services.
+They become active only after reaching the default branch; posting a command cannot test a new workflow definition that exists only on a PR.
+An authorized command explicitly approves execution of that PR head, including fork and draft code, on a read-only hosted worker with no production secrets.
+The controller and reporter use trusted default-branch code and never execute the PR or its artifacts.
+Read [the security and hosted-validation procedure](docs/ci-commands.md) before enabling required checks.
+After security review and hosted validation, require only **`ci-comment /test`**, preferably with GitHub Actions as the expected source.
+Do not require lint, partial-test, controller job, worker job or `ci-command-state/` contexts as substitutes.
+This change does not enable branch protection or modify repository settings.
 
 ## Changing the service
 

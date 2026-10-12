@@ -67,6 +67,42 @@ class CiPolicyTest(unittest.TestCase):
         self.assertIn(".tools/.crates.toml", text)
         self.assertIn(".tools/.crates2.json", text)
 
+    def test_command_controller_never_checks_out_or_executes_pr_code(self):
+        text = self.workflow("ci-command.yml")
+        self.assertIn("issue_comment:\n    types: [created]", text)
+        self.assertIn("workflow_run:\n    workflows: [CI command worker]\n    types: [completed]", text)
+        self.assertIn("cancel-in-progress: false", text)
+        self.assertIn("queue: max", text)
+        self.assertIn("if: needs.route.outputs.enabled == 'true'", text)
+        self.assertIn("statuses: write", text)
+        self.assertIn("actions: write", text)
+        self.assertIn("ref: ${{ github.sha }}", text)
+        self.assertNotIn("inputs.sha", text)
+        self.assertNotIn("make ", text)
+        self.assertNotIn("download-artifact", text)
+        self.assertNotIn("persist-credentials: true", text)
+        self.assertIn("ci-command-control-", text)
+
+    def test_command_worker_has_non_cancelling_admission_and_no_write_permissions(self):
+        text = self.workflow("ci-command-worker.yml")
+        self.assertIn("workflow_dispatch:", text)
+        self.assertIn("name: Validate accepted request", text)
+        self.assertIn("name: Run PR command", text)
+        self.assertIn("needs: validate", text)
+        self.assertNotIn("concurrency:", text)
+        self.assertNotIn("cancel-in-progress:", text)
+        self.assertIn("contents: read", text)
+        self.assertNotIn(": write", text)
+        self.assertNotIn("secrets.", text)
+        self.assertNotIn("actions/cache", text)
+        self.assertNotIn("upload-artifact", text)
+        self.assertIn("ref: ${{ inputs.sha }}", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertIn("worker-check", text)
+        self.assertIn("comment_ci.py execute", text)
+        # Expressions belong in step environment, not shell text.
+        self.assertNotRegex(text, r"run:.*\$\{\{")
+
     def test_only_source_workflow_is_excluded_from_generation(self):
         excluded = (ROOT / ".genignore").read_text().splitlines()
         self.assertIn("/.github/workflows/template-ci.yml", excluded)
@@ -117,19 +153,30 @@ class GeneratedCiTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.source = Path(self.temporary.name) / "source"
         self.project = Path(self.temporary.name) / "project"
-        self.files = (".github/workflows/format.yml", ".github/dependabot.yml")
+        self.files = (
+            ".github/workflows/format.yml", ".github/dependabot.yml",
+            ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
+            ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
+        )
         for name in self.files:
             for root in (self.source, self.project):
                 file = root / name
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_text("literal ${{ github.sha }}\n")
-        (self.project / "Makefile").write_text("test:\n\tcargo test --locked\n")
+        (self.project / "Makefile").write_text("test:\n\tcargo test --locked\ntest-crate:\n\tpython3 helper\n")
 
     def check(self):
         template_test.check_ci_files(self.project, self.source)
 
     def test_plain_configs_pass(self):
         self.check()
+
+    def test_actual_shared_command_support_exists(self):
+        for name in (
+            ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
+            ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
+        ):
+            self.assertTrue((ROOT / name).is_file(), f"Missing shared command support: {name}")
 
     def test_missing_or_changed_config_is_rejected(self):
         for name in self.files:

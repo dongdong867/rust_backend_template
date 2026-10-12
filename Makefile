@@ -7,7 +7,7 @@ FEATURES ?=
 CARGO_FEATURES = $(if $(strip $(FEATURES)),--features "$(FEATURES)")
 
 .DEFAULT_GOAL := help
-.PHONY: help run migrate build test test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version
+.PHONY: help run migrate build test test-crate test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -24,6 +24,11 @@ build: ## Build the release binary
 test: ## Run fast tests without PostgreSQL
 	cargo test --locked --workspace $(CARGO_FEATURES)
 	python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
+test-crate: export CRATE ?=
+test-crate: export FEATURES ?=
+test-crate: ## Test one workspace package (CRATE=<exact package name>)
+	python3 .github/ci/test_crate.py
 
 test-db: ## Run real SQL tests on an existing server (requires TEST_DATABASE_URL)
 	@test -n "$${TEST_DATABASE_URL:-}" || { echo "TEST_DATABASE_URL is required; use a dedicated PostgreSQL test server with CREATEDB permission." >&2; exit 1; }
@@ -43,7 +48,7 @@ ci-tools: ## Install the pinned workflow checker locally with checksum verificat
 	python3 scripts/install_actionlint.py --version $(ACTIONLINT_VERSION)
 
 ci-config-check: ci-tools ## Check the actual GitHub Actions workflows
-	.tools/bin/actionlint -shellcheck= -pyflakes= .github/workflows/*.yml
+	python3 scripts/check_ci.py
 
 tool-versions: ## Print tool pins for CI without duplicating versions in workflows
 	@printf 'taplo=%s\ncargo-generate=%s\nactionlint=%s\n' '$(TAPLO_VERSION)' '$(CARGO_GENERATE_VERSION)' '$(ACTIONLINT_VERSION)'

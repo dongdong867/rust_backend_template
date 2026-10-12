@@ -1,0 +1,65 @@
+name: CI command controller
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: [CI command worker]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  route:
+    if: >-
+      github.event_name == 'workflow_run' ||
+      (github.event.issue.pull_request &&
+       (github.event.comment.body == '/lint' || startsWith(github.event.comment.body, '/test')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      enabled: ${{ steps.route.outputs.enabled }}
+      group: ${{ steps.route.outputs.group }}
+      route: ${{ steps.route.outputs.route }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Authorize and route without writing
+        id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/ci/comment_ci.py route
+
+  control:
+    needs: route
+    if: needs.route.outputs.enabled == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+      statuses: write
+    # Acceptance and ALL status writes share one repository/command lock, even across PRs.
+    # Only this controller cancels bound obsolete workers; worker admission never cancels a run.
+    concurrency:
+      group: ci-command-control-${{ needs.route.outputs.group }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Accept or reconcile the latest request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_ROUTE: ${{ needs.route.outputs.route }}
+        run: python3 .github/ci/comment_ci.py control

@@ -3,7 +3,7 @@
 /.tools/
 /target/
 /scripts/
-# Generated services retain only the shared, budget-conscious PR formatting workflow.
+# Generated services retain shared formatting and maintainer-requested command support.
 /.github/workflows/template-ci.yml
 *.env
 .env*

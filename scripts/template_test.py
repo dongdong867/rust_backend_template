@@ -16,6 +16,11 @@ GENERATOR_VERSION = "cargo generate 0.25.0"
 CANONICAL_NAME = "rust-backend-template"
 WORKFLOW_PROBE = ".github/workflows/template-expression-probe.yml"
 WORKFLOW_TEXT = "name: expression probe\nrun-name: ${{ github.sha }}\n"
+SHARED_CI_FILES = (
+    ".github/workflows/format.yml", ".github/dependabot.yml",
+    ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
+    ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
+)
 
 
 def require(condition, message):
@@ -115,7 +120,7 @@ def check_twins(source, canonical):
 
 def check_ci_files(project, source=ROOT):
     """Only plain shared configs survive generation; source tooling never does."""
-    for name in (".github/workflows/format.yml", ".github/dependabot.yml"):
+    for name in SHARED_CI_FILES:
         generated = project / name
         require(generated.is_file(), f"CI configuration missing: {name}.")
         require(generated.read_bytes() == (source / name).read_bytes(),
@@ -127,6 +132,8 @@ def check_ci_files(project, source=ROOT):
                    "ci-tools", "ci-config-check"):
         require(not re.search(rf"^{re.escape(target)}:", makefile, re.MULTILINE),
                 f"Source-only Make target leaked: {target}.")
+    require(re.search(r"^test-crate:", makefile, re.MULTILINE),
+            "Package test target missing from generated service.")
 
 
 def check_project(project, name, include_tasks):
