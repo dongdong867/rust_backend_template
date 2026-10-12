@@ -133,11 +133,14 @@ class PackageTests(unittest.TestCase):
             text = (ROOT / name).read_text()
             self.assertIn(block, text)
             self.assertIn("test test-crate test-db", text)
-        output = subprocess.check_output(
-            ["make", "-n", "test-crate", "CRATE=tasks; echo injected",
-             "FEATURES=api-doc; echo injected"], cwd=ROOT, text=True,
-        )
-        self.assertEqual(output.strip(), "python3 .github/ci/test_crate.py")
+        for make_environment in ({}, {"MAKEFLAGS": "--print-directory", "MAKELEVEL": "1"}):
+            with self.subTest(make_environment=make_environment):
+                output = subprocess.check_output(
+                    ["make", "--no-print-directory", "-n", "test-crate", "CRATE=tasks; echo injected",
+                     "FEATURES=api-doc; echo injected"], cwd=ROOT, text=True,
+                    env=dict(os.environ, **make_environment),
+                )
+                self.assertEqual(output.strip(), "python3 .github/ci/test_crate.py")
 
 
 if __name__ == "__main__":
