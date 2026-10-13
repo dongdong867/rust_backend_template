@@ -3,18 +3,14 @@ name: CI command controller
 on:
   issue_comment:
     types: [created]
-  workflow_run:
-    workflows: [CI command worker]
-    types: [completed]
 
 permissions: {}
 
 jobs:
   route:
     if: >-
-      github.event_name == 'workflow_run' ||
-      (github.event.issue.pull_request &&
-       (github.event.comment.body == '/lint' || startsWith(github.event.comment.body, '/test')))
+      github.event.issue.pull_request &&
+      (github.event.comment.body == '/lint' || startsWith(github.event.comment.body, '/test'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

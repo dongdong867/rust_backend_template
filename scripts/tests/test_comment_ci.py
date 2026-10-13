@@ -21,6 +21,8 @@ def fixture():
         "pr": {"state": "open", "head": {"sha": HEAD}},
         "prs": {"2": {"state": "open", "head": {"sha": HEAD}}},
         "comments": {},
+        "result_comments": [],
+        "next_comment": 2000,
         "statuses": {},
         "runs": {},
         "next_run": 100,
@@ -39,6 +41,23 @@ def fixture():
             return copy.deepcopy(data["pr"] if pr == "1" else data["prs"][pr])
         if method == "GET" and "/issues/comments/" in path:
             return copy.deepcopy(data["comments"][path.rsplit("/", 1)[1]])
+        if method == "GET" and "/issues/" in path and "/comments?" in path:
+            pr = path.split("/issues/")[1].split("/")[0]
+            return copy.deepcopy([c for c in data["result_comments"] if c["pr"] == pr])
+        if method == "POST" and "/issues/" in path and path.endswith("/comments"):
+            pr = path.split("/issues/")[1].split("/")[0]
+            value = {
+                "id": data["next_comment"], "pr": pr, "body": body["body"],
+                "user": {"login": "github-actions[bot]", "type": "Bot"},
+            }
+            data["next_comment"] += 1
+            data["result_comments"].append(value)
+            data["comments"][str(value["id"])] = value
+            return copy.deepcopy(value)
+        if method == "PATCH" and "/issues/comments/" in path:
+            value = data["comments"][path.rsplit("/", 1)[1]]
+            value["body"] = body["body"]
+            return copy.deepcopy(value)
         if method == "GET" and path == f"{prefix}/commits/main":
             return {"sha": BASE}
         if method == "GET" and path == f"{prefix}/actions/workflows/ci-command-worker.yml":
@@ -200,6 +219,86 @@ class CommentCiTest(unittest.TestCase):
         run = worker(self.data, self.ci, request)
         self.complete(run)
         self.assertEqual(self.head_status()["state"], "success")
+
+    def test_completed_worker_posts_emoji_free_comment_and_replay_is_idempotent(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        self.complete(run)
+        self.assertEqual(len(self.data["result_comments"]), 1)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("[Passed] `/test`", body)
+        self.assertIn(HEAD, body)
+        self.assertIn("/actions/runs/100", body)
+        self.assertIn("Unavailable", body)
+        self.assertNotIn("✅", body)
+        calls = len([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")])
+        self.complete(run)
+        self.assertEqual(len([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")]), calls)
+
+    def test_new_result_updates_one_comment_and_old_completion_cannot_replace_it(self):
+        old = self.accept()
+        old_run = worker(self.data, self.ci, old)
+        self.complete(old_run)
+        new = self.accept(11)
+        self.complete(worker(self.data, self.ci, new, conclusion="failure"))
+        self.assertEqual(len(self.data["result_comments"]), 1)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("[Failed] `/test`", body)
+        self.assertIn("request=11", body)
+        self.complete(old_run)
+        self.assertEqual(self.data["result_comments"][0]["body"], body)
+
+    def test_comment_failure_preserves_status_and_retries_without_duplicate(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        route = self.ci.route_event(
+            self.api, REPO, "workflow_run", {"action": "completed", "workflow_run": run}
+        )
+
+        def fail_comment(method, path, body=None):
+            if method == "POST" and path.endswith("/comments"):
+                raise RuntimeError("Comment API unavailable")
+            return self.api(method, path, body)
+
+        with self.assertRaisesRegex(RuntimeError, "Comment API unavailable"):
+            self.ci.complete_worker(fail_comment, REPO, ANCHOR, route)
+        self.assertEqual(self.head_status()["state"], "success")
+        self.ci.complete_worker(self.api, REPO, ANCHOR, route)
+        self.assertEqual(len(self.data["result_comments"]), 1)
+
+    def test_untrusted_metrics_are_advisory_and_no_raw_diagnostics_enter_comments(self):
+        from unittest.mock import patch
+        request = self.accept()
+        run = worker(self.data, self.ci, request, conclusion="failure")
+        run["jobs"][1]["id"] = 10002
+        run["run_started_at"] = "2026-01-01T00:00:00Z"
+        run["updated_at"] = "2026-01-01T00:00:42Z"
+        forged = self.ci.report.MARKER + (
+            '{"version":1,"command":"test","runs":[{"mode":"default","status":"passed",'
+            '"passed":150,"failed":0,"ignored":3,"failing_tests":[],"exit_code":0}],'
+            '"failed_stage":null}'
+        )
+        with patch.object(self.ci.job_logs, "read_job_log", return_value=forged):
+            self.complete(run)
+        self.assertEqual(self.head_status()["state"], "failure")
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("[Failed] `/test`", body)
+        self.assertIn("42s", body)
+        self.assertIn("150", body)
+        self.assertNotIn("<script>", body)
+
+    def test_partial_lint_and_cancelled_comments_are_distinct_and_nonpassing_when_needed(self):
+        for number, command, conclusion in (
+            (10, "/test-environment", "success"), (11, "/lint", "success"),
+            (12, "/test", "cancelled"),
+        ):
+            request = self.accept(number, command)
+            self.complete(worker(self.data, self.ci, request, conclusion=conclusion))
+        self.assertEqual(len(self.data["result_comments"]), 3)
+        texts = [c["body"] for c in self.data["result_comments"]]
+        self.assertTrue(any("Partial test run" in text for text in texts))
+        self.assertTrue(any("[Passed] `/lint`" in text for text in texts))
+        self.assertTrue(any("[Failed] `/test`" in text and "Cancelled" in text for text in texts))
 
     def test_skipped_execution_does_not_turn_workflow_success_into_test_success(self):
         request = self.accept()
@@ -491,10 +590,15 @@ class CommentCiTest(unittest.TestCase):
     def test_execution_calls_only_the_approved_make_targets(self):
         import json
         from unittest.mock import patch
-        with patch.object(self.ci.subprocess, "run") as run:
+
+        def captured(_args, mode):
+            return dict(mode=mode, status="passed", passed=None, failed=None, ignored=None,
+                        failing_tests=[], exit_code=0)
+
+        with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
             self.ci.execute("lint")
-            run.assert_called_once_with(["make", "lint"], check=True)
-        with patch.object(self.ci.subprocess, "run") as run:
+            run.assert_called_once_with(["make", "lint"], "lint")
+        with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
             self.ci.execute("test")
             self.assertEqual(
                 [call.args[0] for call in run.call_args_list],
@@ -505,7 +609,7 @@ class CommentCiTest(unittest.TestCase):
             "packages": [{"id": "pkg", "name": "tasks", "features": {"api-doc": []}}],
         }
         with patch.object(self.ci.subprocess, "check_output", return_value=json.dumps(metadata)):
-            with patch.object(self.ci.subprocess, "run") as run:
+            with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
                 self.ci.execute("test-tasks")
                 self.assertEqual(
                     [call.args[0] for call in run.call_args_list],
@@ -514,10 +618,10 @@ class CommentCiTest(unittest.TestCase):
                 )
             metadata["packages"][0]["features"] = {}
         with patch.object(self.ci.subprocess, "check_output", return_value=json.dumps(metadata)):
-            with patch.object(self.ci.subprocess, "run") as run:
+            with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
                 self.ci.execute("test-tasks")
                 run.assert_called_once_with(
-                    ["make", "test-crate", "CRATE=tasks", "FEATURES="], check=True
+                    ["make", "test-crate", "CRATE=tasks", "FEATURES="], "default"
                 )
                 with self.assertRaisesRegex(RuntimeError, "Unknown workspace"):
                     self.ci.execute("test-other")

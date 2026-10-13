@@ -5,16 +5,20 @@ See [the README](../README.md#maintainer-requested-checks) for their behavior an
 
 ## Trust boundaries
 
-`ci-command.yml` handles newly created issue comments and completed runs of `ci-command-worker.yml`.
+`ci-command.yml` handles newly created issue comments.
+`ci-command-completion.yml` independently handles completed runs of `ci-command-worker.yml`.
+Its trigger accepts the static worker name and dynamic `ci-command *` run names; it does not call back into the dispatcher or trigger itself.
+GitHub's completed-run names can differ from the workflow's configured name, so a static-name-only callback is insufficient evidence of delivery.
 Its read-only route job checks exact syntax, an open PR and the commenter's current repository write, maintain or admin permission.
 Rejected commands never enter the controller or dispatch a worker.
 The controller rechecks the comment and permission before accepting it.
 An accepted request contains a PR number, command, comment ID, accepting controller run ID, exact PR head SHA and trusted worker workflow SHA.
 The controller uses REST API version `2026-03-10` and binds ownership to the worker ID returned by dispatch; a legacy response without an ID fails closed.
 
-The controller alone has `actions: write` for dispatch/cancellation and `statuses: write` for reporting.
-It checks out only `github.sha`, which is a trusted default-branch commit for both trigger types.
-It never evaluates PR source, Makefiles, toolchain files, caches or artifacts.
+Only the dispatcher has `actions: write` for dispatch/cancellation.
+Both trusted control jobs can write statuses, and only completion reporting has `pull-requests: write` to maintain a result comment.
+Both check out only `github.sha`, a trusted default-branch commit for their respective trigger types.
+Neither evaluates PR source, Makefiles, toolchain files, caches or artifacts.
 Workers have only read permissions and non-persisted checkout credentials.
 No production secret, writable token, privileged environment, self-hosted runner or shared writable cache is used for PR execution.
 Do not enable private-fork settings that send write tokens or secrets to PR workflows.
@@ -33,6 +37,23 @@ An unsupported rerun invalidates that owner's earlier passing result, but cannot
 Success also requires both the validation and execution jobs to have succeeded; a skipped execution job cannot count as passing tests.
 The reporter never downloads or trusts worker-produced artifacts.
 Manual worker dispatches and Actions reruns are not the supported request interface; create a new command comment.
+
+## Result comments
+
+Completion reporting maintains one bot-owned comment per PR and command, headed `[Passed]` or `[Failed]`, with no emojis.
+The comment identifies the captured commit, full/lint/package scope, duration, logs and safe failure reason.
+Counts are test executions per feature mode, not unique tests across modes.
+Partial comments explicitly cannot satisfy `/test`; coverage is not collected in this version.
+When an existing comment is edited, GitHub may not send a new notification.
+
+Workers stream ordinary Make output and emit a bounded JSON summary line into their logs.
+The reporter reads only the bound execution job's small log, never an artifact or executable file.
+API credentials are sent only to the initial API request and are removed before following HTTPS log-storage redirects.
+Missing, oversized or malformed summaries mean counts are unavailable, not zero.
+Only bounded numeric values, known stages and validated test identifiers can reach Markdown; raw diagnostics are never pasted.
+These summaries are untrusted and advisory. They never determine authorization, status or whether a commit can merge.
+Status is finalized from validated GitHub run/job metadata before comment publication; a comment API failure can be retried without reverting that status or duplicating the comment.
+The latest per-PR request owns its result comment, even where another PR owns the same SHA's shared status.
 
 ## Why cancellation alone is insufficient
 
@@ -62,14 +83,14 @@ GitHub's status-count limits still apply; API failures are nonpassing and requir
 ## Workflow checker compatibility
 
 Pinned actionlint `1.7.12` does not yet recognize GitHub's documented `queue: max` field.
-`make ci-config-check` runs that checker on the original workflow files and validates the one canonical non-cancelling controller mapping separately.
-Only its exact unsupported-key diagnostic at that validated location is exempted; wrong values, alternate placement, duplicate keys and all other diagnostics still fail.
+`make ci-config-check` runs that checker on the original workflow files and validates the two canonical non-cancelling control mappings separately.
+Only its exact unsupported-key diagnostic at each named, validated location is exempted; wrong values, alternate placement, duplicate keys and all other diagnostics still fail.
 No YAML is stripped or rewritten before checking.
 Remove the compatibility exception when a released checker natively supports the field.
 
 ## Required check rollout
 
-Both workflows must first reach the default branch.
+The dispatcher, worker and completion workflows must first reach the default branch.
 Review the privilege boundaries, state/status writer serialization, request matching and workflow pins before making a check required.
 Keep `ci-comment /test` non-required until the following hosted evidence is collected on the exact installed workflow version:
 
@@ -84,6 +105,7 @@ Keep `ci-comment /test` non-required until the following hosted evidence is coll
 9. Generated repositories with and without the example retain the byte-identical workflows/helpers and the package test target, with their generated service name.
 10. Two PRs sharing a head SHA execute independently, but only the newest accepted request can change that SHA/command's visible result. A closed older PR cannot overwrite it.
 11. The dispatch response's worker ID owns the request; duplicate dispatches and reruns cannot take over. A changed dispatch base becomes a nonpassing result.
+12. A successful worker actually triggers completion reporting and its status becomes terminal. `[Passed]`/`[Failed]` result comments show safe metrics, unavailable/not-run data accurately, and only the latest result updates the same command comment.
 
 Then, with separate repository-settings approval, require only `ci-comment /test` on the integration branch.
 Select GitHub Actions as its expected source where GitHub offers that setting.

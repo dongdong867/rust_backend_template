@@ -178,10 +178,17 @@ When PRs share a head SHA, their commit status is shared: only the newest accept
 Repeat checks with a new comment, not **Re-run jobs** or manual worker dispatch.
 Cancellation and timeout are nonpassing status errors.
 
-Both command workflows and `.github/ci/` helpers are retained in generated services.
+Completed runs receive one updated bot result comment per PR and command, headed `[Passed]` or `[Failed]`, without emojis.
+Comments show the tested commit, scope, duration, logs, safe failure details and per-feature execution counts when available.
+Counts from bounded worker summaries are advisory; the validated GitHub check status remains the merge gate.
+Missing metrics are unavailable, not zero, and coverage is not collected yet.
+Editing an existing result comment may not send a fresh notification.
+
+The dispatcher, read-only worker and trusted completion workflows and `.github/ci/` helpers are retained in generated services.
 They become active only after reaching the default branch; posting a command cannot test a new workflow definition that exists only on a PR.
 An authorized command explicitly approves execution of that PR head, including fork and draft code, on a read-only hosted worker with no production secrets.
 The controller and reporter use trusted default-branch code and never execute the PR or its artifacts.
+Only the completion reporter has PR-comment write permission; it reads bounded log summary data without forwarding API credentials to log-storage redirects.
 Read [the security and hosted-validation procedure](docs/ci-commands.md) before enabling required checks.
 After security review and hosted validation, require only **`ci-comment /test`**, preferably with GitHub Actions as the expected source.
 Do not require lint, partial-test, controller job, worker job or `ci-command-state/` contexts as substitutes.
