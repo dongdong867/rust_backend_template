@@ -392,6 +392,8 @@ def result_comment(api, repo, anchor, request, state, run, reason=None):
     summary = None
     if isinstance(run, dict):
         try:
+            if not isinstance(run.get("run_started_at"), str) or not isinstance(run.get("updated_at"), str):
+                raise ValueError("Missing duration timestamps.")
             start = datetime.fromisoformat(run["run_started_at"].replace("Z", "+00:00"))
             end = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
             duration = (end - start).total_seconds()

@@ -266,6 +266,19 @@ class CommentCiTest(unittest.TestCase):
         self.ci.complete_worker(self.api, REPO, ANCHOR, route)
         self.assertEqual(len(self.data["result_comments"]), 1)
 
+    def test_missing_or_invalid_run_dates_do_not_block_cancelled_result_comment(self):
+        for date in (None, 123, "not-a-timestamp"):
+            with self.subTest(date=date):
+                self.data, self.api = fixture()
+                request = self.accept()
+                run = worker(self.data, self.ci, request, conclusion="cancelled")
+                run["run_started_at"] = date
+                run["updated_at"] = date
+                self.complete(run)
+                self.assertEqual(self.head_status()["state"], "error")
+                self.assertIn("Duration: Unavailable", self.data["result_comments"][0]["body"])
+                self.assertIn("Cancelled", self.data["result_comments"][0]["body"])
+
     def test_untrusted_metrics_are_advisory_and_no_raw_diagnostics_enter_comments(self):
         from unittest.mock import patch
         request = self.accept()
