@@ -15,6 +15,7 @@ STAGES = (None, "lint", "default tests", "api-doc tests", "package selection")
 REASONS = (
     "Cancelled", "Timed out", "Worker failed", "Worker validation failed",
     "PR head changed", "Worker unavailable", "Dispatch failed", "Unsupported rerun",
+    "Reason unavailable",
 )
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z_][A-Za-z0-9_]*)*")
 

@@ -19,6 +19,11 @@ from urllib.request import Request, urlopen
 WORKFLOW = "ci-command-worker.yml"
 WORKFLOW_PATH = f".github/workflows/{WORKFLOW}"
 REQUEST_FIELDS = ("pr", "command", "sha", "request", "controller", "base")
+OUTCOME_REASONS = {
+    "-": None, "h": "PR head changed", "c": "Cancelled", "t": "Timed out",
+    "f": "Worker failed", "v": "Worker validation failed", "u": "Worker unavailable",
+    "d": "Dispatch failed", "r": "Unsupported rerun", "?": "Reason unavailable",
+}
 
 
 def sibling(name):
@@ -226,15 +231,35 @@ def actions_status(status):
     return creator.get("type") == "Bot" and creator.get("login") == "github-actions[bot]"
 
 
+def outcome_code(state, reason):
+    if state not in ("pending", "success", "failure", "error") or (
+        (state in ("pending", "success")) != (reason is None)
+    ):
+        raise RuntimeError("Invalid command outcome.")
+    for code, label in OUTCOME_REASONS.items():
+        if label == reason:
+            return code
+    raise RuntimeError("Unknown command outcome reason.")
+
+
 def state_records(api, repo, anchor, pr, command):
     context = state_context(pr, command)
     for status in pages(api, f"repos/{repo}/commits/{anchor}/statuses"):
         if status["context"] != context:
             continue
         try:
-            version, comment, controller, head, base = status["description"].split("|")
-            if version != "v2" or not actions_status(status):
+            fields = status["description"].split("|")
+            if len(fields) == 5 and fields[0] == "v2":
+                _, comment, controller, head, base = fields
+                reason = "Reason unavailable" if status["state"] in ("failure", "error") else None
+            elif len(fields) == 6 and fields[0] == "v3":
+                _, comment, controller, head, base, code = fields
+                reason = OUTCOME_REASONS[code]
+            else:
+                raise RuntimeError("Unknown state version.")
+            if not actions_status(status):
                 raise RuntimeError("Unknown state version or writer.")
+            outcome_code(status["state"], reason)
             request = validate_request({
                 "pr": pr, "command": command, "request": comment,
                 "controller": controller, "sha": head, "base": base,
@@ -244,13 +269,14 @@ def state_records(api, repo, anchor, pr, command):
                 raise RuntimeError("Invalid worker URL.")
             owner = number(status["target_url"][len(prefix):])
             request["worker"] = None if owner == controller else owner
-            yield request, status["state"]
+            yield request, status["state"], reason
         except (RuntimeError, ValueError, TypeError, KeyError):
             raise RuntimeError("Invalid durable command request record; refusing to overwrite it.") from None
 
 
 def read_state(api, repo, anchor, pr, command):
-    return next(state_records(api, repo, anchor, pr, command), (None, None))
+    request, state, _ = next(state_records(api, repo, anchor, pr, command), (None, None, None))
+    return request, state
 
 
 def run_url(repo, run_id):
@@ -258,9 +284,13 @@ def run_url(repo, run_id):
     return f"{server}/{repo}/actions/runs/{run_id}"
 
 
-def write_state(api, repo, anchor, request, state):
-    # The description fits GitHub's 140-character limit. The URL binds the dispatch's actual ID.
-    description = "|".join(["v2", *(request[k] for k in ("request", "controller", "sha", "base"))])
+def write_state(api, repo, anchor, request, state, reason=None):
+    # Store the decision before commenting: live PR metadata cannot reconstruct it on retry.
+    # One reason code keeps even maximum-width IDs within GitHub's 140-character limit.
+    code = outcome_code(state, reason)
+    description = "|".join(["v3", *(request[k] for k in ("request", "controller", "sha", "base")), code])
+    if len(description) > 140:
+        raise RuntimeError("State description exceeds GitHub's limit.")
     api("POST", f"repos/{repo}/statuses/{anchor}", {
         "context": state_context(request["pr"], request["command"]),
         "state": state, "description": description,
@@ -298,7 +328,7 @@ def write_result(api, repo, request, state, description, target):
 def cancel_obsolete(api, repo, anchor, request):
     """Cancel only previously bound owners for this PR/command, never concurrent other PRs."""
     seen = set()
-    for previous, phase in state_records(api, repo, anchor, request["pr"], request["command"]):
+    for previous, phase, _ in state_records(api, repo, anchor, request["pr"], request["command"]):
         owner = previous["worker"]
         if owner is None or owner in seen or int(previous["request"]) >= int(request["request"]):
             continue
@@ -351,7 +381,7 @@ def accept_comment(api, repo, anchor, route, controller):
         )
     except (RuntimeError, KeyError, TypeError):
         write_result(api, repo, request, "error", "Worker dispatch failed; post a new command.", target)
-        write_state(api, repo, anchor, request, "error")
+        write_state(api, repo, anchor, request, "error", "Dispatch failed")
         raise RuntimeError("Command worker dispatch failed.") from None
     return request
 
@@ -367,7 +397,7 @@ def matching_run(api, repo, request, run):
     )
 
 
-def result_comment(api, repo, anchor, request, state, run, reason=None):
+def result_comment(api, repo, anchor, request, state, run, reason):
     """Latest per-PR result only; commit statuses remain the independently verified merge gate."""
     latest, _ = read_state(api, repo, anchor, request["pr"], request["command"])
     if latest != request or request["worker"] is None:
@@ -407,12 +437,6 @@ def result_comment(api, repo, anchor, request, state, run, reason=None):
             if execution is not None and execution.get("id") is not None:
                 text = job_logs.read_job_log(repo, number(execution["id"]))
                 summary = report.parse_summary(text, request["command"])
-    if reason is None and isinstance(run, dict):
-        reason = {
-            "cancelled": "Cancelled", "timed_out": "Timed out", "failure": "Worker failed",
-        }.get(run.get("conclusion"))
-        if run.get("run_attempt") != 1:
-            reason = "Unsupported rerun"
     body = report.render_comment(
         request, state, run_url(repo, request["worker"]),
         duration_seconds=duration, summary=summary, reason=reason,
@@ -428,7 +452,9 @@ def result_comment(api, repo, anchor, request, state, run, reason=None):
 
 def reconcile(api, repo, anchor, request, comments=False):
     """Recompute the latest accepted request, even if Actions replaced a pending event."""
-    latest, state = read_state(api, repo, anchor, request["pr"], request["command"])
+    latest, state, reason = next(
+        state_records(api, repo, anchor, request["pr"], request["command"]), (None, None, None)
+    )
     if latest != request:
         return
     if request["worker"] is None:
@@ -436,7 +462,7 @@ def reconcile(api, repo, anchor, request, comments=False):
     run = api("GET", f"repos/{repo}/actions/runs/{request['worker']}")
     if state == "error":
         if comments:
-            result_comment(api, repo, anchor, request, state, run)
+            result_comment(api, repo, anchor, request, state, run, reason)
         return
     if run is None:
         if state == "pending":
@@ -444,15 +470,16 @@ def reconcile(api, repo, anchor, request, comments=False):
                 api, repo, request, "error", "Worker result unavailable; post a new command.",
                 run_url(repo, request["worker"]),
             )
-            write_state(api, repo, anchor, request, "error")
+            reason = "Worker unavailable"
+            write_state(api, repo, anchor, request, "error", reason)
             state = "error"
         if comments:
-            result_comment(api, repo, anchor, request, state, None, "Worker unavailable")
+            result_comment(api, repo, anchor, request, state, None, reason)
         return
     # Initial-attempt completions stay idempotent, but an unsupported rerun invalidates a green owner.
     if state != "pending" and run["run_attempt"] == 1:
         if comments:
-            result_comment(api, repo, anchor, request, state, run)
+            result_comment(api, repo, anchor, request, state, run, reason)
         return
     if run["status"] != "completed" and run["run_attempt"] == 1:
         return
@@ -461,13 +488,18 @@ def reconcile(api, repo, anchor, request, comments=False):
     conclusion = run["conclusion"]
     state = "failure" if conclusion == "failure" else "error"
     description = "Check did not pass; see the worker run."
+    reason = {
+        "cancelled": "Cancelled", "timed_out": "Timed out", "failure": "Worker failed",
+    }.get(conclusion, "Worker validation failed")
     if pr["state"] != "open" or pr["head"]["sha"] != request["sha"]:
         description = "PR closed or head changed; post a new command for its current head."
         state = "error"
+        reason = "PR head changed"
     elif not matching_run(api, repo, request, run):
         # Mutable dispatch refs or manual reruns are errors on the bound owner, not missing candidates.
         description = "Worker identity or workflow commit changed; post a new command."
         state = "error"
+        reason = "Unsupported rerun" if run.get("run_attempt") != 1 else "Worker validation failed"
     elif conclusion == "success":
         jobs = list(pages(
             api, f"repos/{repo}/actions/runs/{run['id']}/attempts/1/jobs", "jobs"
@@ -478,11 +510,11 @@ def reconcile(api, repo, anchor, request, comments=False):
         ):
             state = "success"
             description = "Full tests passed." if request["command"] == "test" else "Requested check passed."
+            reason = None
     # A newer request on any PR with this SHA owns its result; this PR's cursor still closes.
     write_result(api, repo, request, state, description, target)
-    write_state(api, repo, anchor, request, state)
+    write_state(api, repo, anchor, request, state, reason)
     if comments:
-        reason = "PR head changed" if pr["state"] != "open" or pr["head"]["sha"] != request["sha"] else None
         result_comment(api, repo, anchor, request, state, run, reason)
 
 

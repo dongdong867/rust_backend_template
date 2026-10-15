@@ -235,6 +235,179 @@ class CommentCiTest(unittest.TestCase):
         self.complete(run)
         self.assertEqual(len([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")]), calls)
 
+    def test_head_change_reason_survives_replay_and_later_pr_changes(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        self.data["pr"]["head"]["sha"] = "d" * 40
+        self.complete(run)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("- Reason: PR head changed", body)
+        statuses = copy.deepcopy(self.data["statuses"])
+        writes = [c for c in self.data["calls"] if c[0] in ("POST", "PATCH")]
+        # Returning to the captured head cannot change why this result was rejected.
+        self.data["pr"]["head"]["sha"] = HEAD
+        self.complete(run)
+        self.assertEqual(self.data["result_comments"][0]["body"], body)
+        self.assertEqual(self.data["statuses"], statuses)
+        self.assertEqual([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")], writes)
+
+    def test_head_change_reason_survives_failed_comment_post_or_patch(self):
+        for method in ("POST", "PATCH"):
+            with self.subTest(method=method):
+                self.data, self.api = fixture()
+                if method == "PATCH":
+                    previous = self.accept()
+                    self.complete(worker(self.data, self.ci, previous))
+                request = self.accept(11)
+                run = worker(self.data, self.ci, request)
+                self.data["pr"]["head"]["sha"] = "d" * 40
+                route = self.ci.route_event(
+                    self.api, REPO, "workflow_run", {"action": "completed", "workflow_run": run}
+                )
+
+                def fail_comment(verb, path, body=None):
+                    if verb == method and "/comments" in path:
+                        raise RuntimeError("Comment API unavailable")
+                    return self.api(verb, path, body)
+
+                with self.assertRaisesRegex(RuntimeError, "Comment API unavailable"):
+                    self.ci.complete_worker(fail_comment, REPO, ANCHOR, route)
+                self.assertEqual(self.head_status()["state"], "error")
+                self.assertEqual(
+                    next(self.ci.state_records(self.api, REPO, ANCHOR, "1", "test")),
+                    (request, "error", "PR head changed"),
+                )
+                statuses = copy.deepcopy(self.data["statuses"])
+                self.data["pr"]["head"]["sha"] = HEAD
+                self.complete(run)
+                self.assertEqual(len(self.data["result_comments"]), 1)
+                body = self.data["result_comments"][0]["body"]
+                self.assertIn("- Reason: PR head changed", body)
+                self.assertIn("request=11;", body)
+                self.assertEqual(self.data["statuses"], statuses)
+
+    def test_terminal_failure_reasons_survive_replay(self):
+        for kind, reason in (
+            ("failure", "Worker failed"), ("cancelled", "Cancelled"),
+            ("timed_out", "Timed out"), ("identity", "Worker validation failed"),
+            ("skipped", "Worker validation failed"), ("rerun", "Unsupported rerun"),
+        ):
+            with self.subTest(kind=kind):
+                self.data, self.api = fixture()
+                request = self.accept()
+                run = worker(self.data, self.ci, request)
+                if kind == "identity":
+                    run["head_sha"] = "d" * 40
+                elif kind == "skipped":
+                    run["jobs"][1]["conclusion"] = "skipped"
+                elif kind == "rerun":
+                    self.complete(run)
+                    run["run_attempt"] = 2
+                else:
+                    run["conclusion"] = kind
+                    run["jobs"][1]["conclusion"] = kind
+                self.complete(run)
+                body = self.data["result_comments"][0]["body"]
+                self.assertIn(f"- Reason: {reason}", body)
+                statuses = copy.deepcopy(self.data["statuses"])
+                self.data["pr"]["state"] = "closed"
+                self.complete(run)
+                self.assertEqual(self.data["result_comments"][0]["body"], body)
+                self.assertEqual(self.data["statuses"], statuses)
+
+    def test_missing_worker_reason_survives_reconciliation_retry(self):
+        request = self.accept()
+
+        def missing_run(method, path, body=None):
+            if method == "GET" and path == f"repos/{REPO}/actions/runs/{request['worker']}":
+                return None
+            return self.api(method, path, body)
+
+        self.ci.reconcile(missing_run, REPO, ANCHOR, request, comments=True)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("- Reason: Worker unavailable", body)
+        statuses = copy.deepcopy(self.data["statuses"])
+        self.ci.reconcile(missing_run, REPO, ANCHOR, request, comments=True)
+        self.assertEqual(self.data["result_comments"][0]["body"], body)
+        self.assertEqual(self.data["statuses"], statuses)
+
+    def test_legacy_cursor_keeps_identity_and_uses_neutral_unknown_reason(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        self.data["pr"]["head"]["sha"] = "d" * 40
+        self.complete(run)
+        record = self.data["statuses"][ANCHOR][0]
+        record["description"] = "|".join(
+            ["v2", *(request[k] for k in ("request", "controller", "sha", "base"))]
+        )
+        statuses = copy.deepcopy(self.data["statuses"])
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "error"))
+        self.complete(run)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("- Reason: Reason unavailable", body)
+        self.assertNotIn("- Reason: Worker failed", body)
+        self.assertEqual(self.data["statuses"], statuses)
+
+    def test_legacy_pending_cursor_still_admits_its_bound_worker(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        run["status"] = "in_progress"
+        run["conclusion"] = None
+        cursor = self.data["statuses"][ANCHOR][0]
+        cursor["description"] = "|".join(
+            ["v2", *(request[k] for k in ("request", "controller", "sha", "base"))]
+        )
+        self.assertEqual(
+            self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), request["worker"]),
+            request,
+        )
+        # A new controller can cancel legacy owners and persist only its new-format request.
+        new = self.accept(11)
+        self.assertEqual(self.data["runs"][request["worker"]]["conclusion"], "cancelled")
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (new, "pending"))
+
+    def test_shared_sha_status_owner_does_not_erase_another_prs_recorded_reason(self):
+        old = self.accept()
+        run = worker(self.data, self.ci, old)
+        new = self.accept(11, pr=2)
+        self.complete(worker(self.data, self.ci, new))
+        self.data["pr"]["state"] = "closed"
+        self.complete(run)
+        body = next(c["body"] for c in self.data["result_comments"] if c["pr"] == "1")
+        self.assertIn("- Reason: PR head changed", body)
+        self.assertEqual(self.head_status()["state"], "success")
+        statuses = copy.deepcopy(self.data["statuses"])
+        self.data["pr"]["state"] = "open"
+        self.complete(run)
+        self.assertEqual(next(c["body"] for c in self.data["result_comments"] if c["pr"] == "1"), body)
+        self.assertEqual(self.data["statuses"], statuses)
+
+    def test_cursor_reason_codes_are_bounded_and_fail_closed(self):
+        event = comment(self.data, number=10**20 - 1)
+        route = self.ci.route_event(self.api, REPO, "issue_comment", event)
+        request = self.ci.accept_comment(self.api, REPO, ANCHOR, route, str(10**20 - 2))
+        self.data["pr"]["state"] = "closed"
+        self.complete(worker(self.data, self.ci, request))
+        cursor = self.data["statuses"][ANCHOR][0]
+        description = cursor["description"]
+        self.assertTrue(description.startswith("v3|"))
+        self.assertLessEqual(len(description), 140)
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "error"))
+        for bad in (
+            description.rsplit("|", 1)[0] + "|unknown",
+            description.rsplit("|", 1)[0] + "|",
+            description + "|extra",
+            description.replace("v3|", "v99|", 1),
+        ):
+            with self.subTest(description=bad):
+                cursor["description"] = bad
+                with self.assertRaisesRegex(RuntimeError, "record"):
+                    self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
+        cursor["description"] = description
+        cursor["state"] = "pending"
+        with self.assertRaisesRegex(RuntimeError, "record"):
+            self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
+
     def test_new_result_updates_one_comment_and_old_completion_cannot_replace_it(self):
         old = self.accept()
         old_run = worker(self.data, self.ci, old)

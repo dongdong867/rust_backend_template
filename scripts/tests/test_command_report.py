@@ -148,6 +148,13 @@ class CommandReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             report.render_comment({**request, "command": "@evil"}, "success", url)
 
+    def test_unknown_legacy_reason_is_neutral_and_safe(self):
+        request = {"command": "test", "sha": "a"*40}
+        url = "https://github.com/owner/repo/actions/runs/123"
+        text = report.render_comment(request, "error", url, reason="Reason unavailable")
+        self.assertIn("- Reason: Reason unavailable", text)
+        self.assertNotIn("- Reason: Worker failed", text)
+
 
 if __name__ == "__main__":
     unittest.main()

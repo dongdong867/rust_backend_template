@@ -53,6 +53,9 @@ Missing, oversized or malformed summaries mean counts are unavailable, not zero.
 Only bounded numeric values, known stages and validated test identifiers can reach Markdown; raw diagnostics are never pasted.
 These summaries are untrusted and advisory. They never determine authorization, status or whether a commit can merge.
 Status is finalized from validated GitHub run/job metadata before comment publication; a comment API failure can be retried without reverting that status or duplicating the comment.
+The per-PR cursor records the terminal reason before comment publication, so replay does not guess a different explanation from later PR or worker metadata.
+New `v3` cursor descriptions append one validated reason code; existing `v2` cursors remain readable, but their unrecorded terminal reasons display `Reason unavailable`.
+The reason is separate from request identity and fits within GitHub's 140-character status-description limit.
 The latest per-PR request owns its result comment, even where another PR owns the same SHA's shared status.
 
 ## Why cancellation alone is insufficient
