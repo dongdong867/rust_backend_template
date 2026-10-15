@@ -1,7 +1,9 @@
 """Trusted command coordination. Never execute PR code with the controller token."""
 
 import argparse
+from datetime import datetime
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,22 @@ from urllib.request import Request, urlopen
 WORKFLOW = "ci-command-worker.yml"
 WORKFLOW_PATH = f".github/workflows/{WORKFLOW}"
 REQUEST_FIELDS = ("pr", "command", "sha", "request", "controller", "base")
+OUTCOME_REASONS = {
+    "-": None, "h": "PR head changed", "c": "Cancelled", "t": "Timed out",
+    "f": "Worker failed", "v": "Worker validation failed", "u": "Worker unavailable",
+    "d": "Dispatch failed", "r": "Unsupported rerun", "?": "Reason unavailable",
+}
+
+
+def sibling(name):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+report = sibling("command_report")
+job_logs = sibling("github_log")
 
 
 def parse_command(text):
@@ -213,15 +231,35 @@ def actions_status(status):
     return creator.get("type") == "Bot" and creator.get("login") == "github-actions[bot]"
 
 
+def outcome_code(state, reason):
+    if state not in ("pending", "success", "failure", "error") or (
+        (state in ("pending", "success")) != (reason is None)
+    ):
+        raise RuntimeError("Invalid command outcome.")
+    for code, label in OUTCOME_REASONS.items():
+        if label == reason:
+            return code
+    raise RuntimeError("Unknown command outcome reason.")
+
+
 def state_records(api, repo, anchor, pr, command):
     context = state_context(pr, command)
     for status in pages(api, f"repos/{repo}/commits/{anchor}/statuses"):
         if status["context"] != context:
             continue
         try:
-            version, comment, controller, head, base = status["description"].split("|")
-            if version != "v2" or not actions_status(status):
+            fields = status["description"].split("|")
+            if len(fields) == 5 and fields[0] == "v2":
+                _, comment, controller, head, base = fields
+                reason = "Reason unavailable" if status["state"] in ("failure", "error") else None
+            elif len(fields) == 6 and fields[0] == "v3":
+                _, comment, controller, head, base, code = fields
+                reason = OUTCOME_REASONS[code]
+            else:
+                raise RuntimeError("Unknown state version.")
+            if not actions_status(status):
                 raise RuntimeError("Unknown state version or writer.")
+            outcome_code(status["state"], reason)
             request = validate_request({
                 "pr": pr, "command": command, "request": comment,
                 "controller": controller, "sha": head, "base": base,
@@ -231,13 +269,14 @@ def state_records(api, repo, anchor, pr, command):
                 raise RuntimeError("Invalid worker URL.")
             owner = number(status["target_url"][len(prefix):])
             request["worker"] = None if owner == controller else owner
-            yield request, status["state"]
+            yield request, status["state"], reason
         except (RuntimeError, ValueError, TypeError, KeyError):
             raise RuntimeError("Invalid durable command request record; refusing to overwrite it.") from None
 
 
 def read_state(api, repo, anchor, pr, command):
-    return next(state_records(api, repo, anchor, pr, command), (None, None))
+    request, state, _ = next(state_records(api, repo, anchor, pr, command), (None, None, None))
+    return request, state
 
 
 def run_url(repo, run_id):
@@ -245,9 +284,13 @@ def run_url(repo, run_id):
     return f"{server}/{repo}/actions/runs/{run_id}"
 
 
-def write_state(api, repo, anchor, request, state):
-    # The description fits GitHub's 140-character limit. The URL binds the dispatch's actual ID.
-    description = "|".join(["v2", *(request[k] for k in ("request", "controller", "sha", "base"))])
+def write_state(api, repo, anchor, request, state, reason=None):
+    # Store the decision before commenting: live PR metadata cannot reconstruct it on retry.
+    # One reason code keeps even maximum-width IDs within GitHub's 140-character limit.
+    code = outcome_code(state, reason)
+    description = "|".join(["v3", *(request[k] for k in ("request", "controller", "sha", "base")), code])
+    if len(description) > 140:
+        raise RuntimeError("State description exceeds GitHub's limit.")
     api("POST", f"repos/{repo}/statuses/{anchor}", {
         "context": state_context(request["pr"], request["command"]),
         "state": state, "description": description,
@@ -285,7 +328,7 @@ def write_result(api, repo, request, state, description, target):
 def cancel_obsolete(api, repo, anchor, request):
     """Cancel only previously bound owners for this PR/command, never concurrent other PRs."""
     seen = set()
-    for previous, phase in state_records(api, repo, anchor, request["pr"], request["command"]):
+    for previous, phase, _ in state_records(api, repo, anchor, request["pr"], request["command"]):
         owner = previous["worker"]
         if owner is None or owner in seen or int(previous["request"]) >= int(request["request"]):
             continue
@@ -338,7 +381,7 @@ def accept_comment(api, repo, anchor, route, controller):
         )
     except (RuntimeError, KeyError, TypeError):
         write_result(api, repo, request, "error", "Worker dispatch failed; post a new command.", target)
-        write_state(api, repo, anchor, request, "error")
+        write_state(api, repo, anchor, request, "error", "Dispatch failed")
         raise RuntimeError("Command worker dispatch failed.") from None
     return request
 
@@ -354,24 +397,89 @@ def matching_run(api, repo, request, run):
     )
 
 
-def reconcile(api, repo, anchor, request):
+def result_comment(api, repo, anchor, request, state, run, reason):
+    """Latest per-PR result only; commit statuses remain the independently verified merge gate."""
+    latest, _ = read_state(api, repo, anchor, request["pr"], request["command"])
+    if latest != request or request["worker"] is None:
+        return
+    marker_prefix = f"<!-- ci-command-result:{command_key(request['command'])};"
+    marker = f"{marker_prefix}request={request['request']};worker={request['worker']} -->"
+    existing = []
+    for comment in pages(api, f"repos/{repo}/issues/{request['pr']}/comments"):
+        author = comment.get("user", {})
+        if author.get("login") != "github-actions[bot]" or author.get("type") != "Bot":
+            continue
+        body = comment.get("body", "")
+        match = re.search(
+            re.escape(marker_prefix) + r"request=([1-9][0-9]{0,19});worker=([1-9][0-9]{0,19}) -->$",
+            body,
+        )
+        if match:
+            if int(match[1]) > int(request["request"]):
+                return
+            existing.append(comment)
+    duration = None
+    summary = None
+    if isinstance(run, dict):
+        try:
+            if not isinstance(run.get("run_started_at"), str) or not isinstance(run.get("updated_at"), str):
+                raise ValueError("Missing duration timestamps.")
+            start = datetime.fromisoformat(run["run_started_at"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
+            duration = (end - start).total_seconds()
+        except (KeyError, ValueError, TypeError):
+            pass
+        if matching_run(api, repo, request, run) and run["status"] == "completed":
+            jobs = list(pages(
+                api, f"repos/{repo}/actions/runs/{request['worker']}/attempts/1/jobs", "jobs"
+            ))
+            execution = next((job for job in jobs if job["name"] == "Run PR command"), None)
+            if execution is not None and execution.get("id") is not None:
+                text = job_logs.read_job_log(repo, number(execution["id"]))
+                summary = report.parse_summary(text, request["command"])
+    body = report.render_comment(
+        request, state, run_url(repo, request["worker"]),
+        duration_seconds=duration, summary=summary, reason=reason,
+    ) + "\n\n" + marker
+    # Numeric metadata and validated names are advisory only, never a reason to change `state`.
+    selected = max(existing, key=lambda item: int(item["id"])) if existing else None
+    if selected is not None:
+        if selected["body"] != body:
+            api("PATCH", f"repos/{repo}/issues/comments/{number(selected['id'])}", {"body": body})
+    else:
+        api("POST", f"repos/{repo}/issues/{request['pr']}/comments", {"body": body})
+
+
+def reconcile(api, repo, anchor, request, comments=False):
     """Recompute the latest accepted request, even if Actions replaced a pending event."""
-    latest, state = read_state(api, repo, anchor, request["pr"], request["command"])
-    if latest != request or state == "error":
+    latest, state, reason = next(
+        state_records(api, repo, anchor, request["pr"], request["command"]), (None, None, None)
+    )
+    if latest != request:
         return
     if request["worker"] is None:
         return
     run = api("GET", f"repos/{repo}/actions/runs/{request['worker']}")
+    if state == "error":
+        if comments:
+            result_comment(api, repo, anchor, request, state, run, reason)
+        return
     if run is None:
         if state == "pending":
             write_result(
                 api, repo, request, "error", "Worker result unavailable; post a new command.",
                 run_url(repo, request["worker"]),
             )
-            write_state(api, repo, anchor, request, "error")
+            reason = "Worker unavailable"
+            write_state(api, repo, anchor, request, "error", reason)
+            state = "error"
+        if comments:
+            result_comment(api, repo, anchor, request, state, None, reason)
         return
     # Initial-attempt completions stay idempotent, but an unsupported rerun invalidates a green owner.
     if state != "pending" and run["run_attempt"] == 1:
+        if comments:
+            result_comment(api, repo, anchor, request, state, run, reason)
         return
     if run["status"] != "completed" and run["run_attempt"] == 1:
         return
@@ -380,13 +488,18 @@ def reconcile(api, repo, anchor, request):
     conclusion = run["conclusion"]
     state = "failure" if conclusion == "failure" else "error"
     description = "Check did not pass; see the worker run."
+    reason = {
+        "cancelled": "Cancelled", "timed_out": "Timed out", "failure": "Worker failed",
+    }.get(conclusion, "Worker validation failed")
     if pr["state"] != "open" or pr["head"]["sha"] != request["sha"]:
         description = "PR closed or head changed; post a new command for its current head."
         state = "error"
+        reason = "PR head changed"
     elif not matching_run(api, repo, request, run):
         # Mutable dispatch refs or manual reruns are errors on the bound owner, not missing candidates.
         description = "Worker identity or workflow commit changed; post a new command."
         state = "error"
+        reason = "Unsupported rerun" if run.get("run_attempt") != 1 else "Worker validation failed"
     elif conclusion == "success":
         jobs = list(pages(
             api, f"repos/{repo}/actions/runs/{run['id']}/attempts/1/jobs", "jobs"
@@ -397,9 +510,12 @@ def reconcile(api, repo, anchor, request):
         ):
             state = "success"
             description = "Full tests passed." if request["command"] == "test" else "Requested check passed."
+            reason = None
     # A newer request on any PR with this SHA owns its result; this PR's cursor still closes.
     write_result(api, repo, request, state, description, target)
-    write_state(api, repo, anchor, request, state)
+    write_state(api, repo, anchor, request, state, reason)
+    if comments:
+        result_comment(api, repo, anchor, request, state, run, reason)
 
 
 def complete_worker(api, repo, anchor, route):
@@ -407,7 +523,7 @@ def complete_worker(api, repo, anchor, route):
         return
     request, _ = read_state(api, repo, anchor, route["pr"], route["command"])
     if request is not None:
-        reconcile(api, repo, anchor, request)
+        reconcile(api, repo, anchor, request, comments=True)
 
 
 def check_worker(api, repo, anchor, inputs, run_id):
@@ -438,25 +554,39 @@ def execute(command):
     """Used only by the read-only worker, after every privileged step has finished."""
     if parse_command("/" + command) is None:
         raise RuntimeError("Invalid command.")
-    if command == "lint":
-        subprocess.run(["make", "lint"], check=True)
-    elif command == "test":
-        for feature in ("", "api-doc"):
-            subprocess.run(["make", "test", f"FEATURES={feature}"], check=True)
-    else:
-        crate = command[len("test-"):]
-        metadata = json.loads(subprocess.check_output(
-            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], text=True
-        ))
-        package = next(
-            (p for p in metadata["packages"]
-             if p["id"] in metadata["workspace_members"] and p["name"] == crate), None
-        )
-        if package is None:
-            raise RuntimeError("Unknown workspace package; partial tests never fall back to full tests.")
-        features = [""] + ([f"{crate}/api-doc"] if "api-doc" in package["features"] else [])
-        for feature in features:
-            subprocess.run(["make", "test-crate", f"CRATE={crate}", f"FEATURES={feature}"], check=True)
+    runs = []
+    stage = "package selection" if command.startswith("test-") else "lint" if command == "lint" else "default tests"
+    try:
+        if command == "lint":
+            commands = [(["make", "lint"], "lint")]
+        elif command == "test":
+            commands = [(["make", "test", f"FEATURES={feature}"], "api-doc" if feature else "default")
+                        for feature in ("", "api-doc")]
+        else:
+            crate = command[len("test-"):]
+            metadata = json.loads(subprocess.check_output(
+                ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], text=True
+            ))
+            package = next(
+                (p for p in metadata["packages"]
+                 if p["id"] in metadata["workspace_members"] and p["name"] == crate), None
+            )
+            if package is None:
+                raise RuntimeError("Unknown workspace package; partial tests never fall back to full tests.")
+            features = [""] + ([f"{crate}/api-doc"] if "api-doc" in package["features"] else [])
+            commands = [
+                (["make", "test-crate", f"CRATE={crate}", f"FEATURES={feature}"],
+                 "api-doc" if feature else "default") for feature in features
+            ]
+        for args, mode in commands:
+            stage = "lint" if mode == "lint" else "api-doc tests" if mode == "api-doc" else "default tests"
+            result = report.capture_make(args, mode)
+            runs.append(result)
+            if result["exit_code"]:
+                raise subprocess.CalledProcessError(result["exit_code"], args)
+        stage = None
+    finally:
+        report.emit_summary(command, runs, stage)
 
 
 def output(values):

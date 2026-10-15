@@ -21,6 +21,8 @@ def fixture():
         "pr": {"state": "open", "head": {"sha": HEAD}},
         "prs": {"2": {"state": "open", "head": {"sha": HEAD}}},
         "comments": {},
+        "result_comments": [],
+        "next_comment": 2000,
         "statuses": {},
         "runs": {},
         "next_run": 100,
@@ -39,6 +41,23 @@ def fixture():
             return copy.deepcopy(data["pr"] if pr == "1" else data["prs"][pr])
         if method == "GET" and "/issues/comments/" in path:
             return copy.deepcopy(data["comments"][path.rsplit("/", 1)[1]])
+        if method == "GET" and "/issues/" in path and "/comments?" in path:
+            pr = path.split("/issues/")[1].split("/")[0]
+            return copy.deepcopy([c for c in data["result_comments"] if c["pr"] == pr])
+        if method == "POST" and "/issues/" in path and path.endswith("/comments"):
+            pr = path.split("/issues/")[1].split("/")[0]
+            value = {
+                "id": data["next_comment"], "pr": pr, "body": body["body"],
+                "user": {"login": "github-actions[bot]", "type": "Bot"},
+            }
+            data["next_comment"] += 1
+            data["result_comments"].append(value)
+            data["comments"][str(value["id"])] = value
+            return copy.deepcopy(value)
+        if method == "PATCH" and "/issues/comments/" in path:
+            value = data["comments"][path.rsplit("/", 1)[1]]
+            value["body"] = body["body"]
+            return copy.deepcopy(value)
         if method == "GET" and path == f"{prefix}/commits/main":
             return {"sha": BASE}
         if method == "GET" and path == f"{prefix}/actions/workflows/ci-command-worker.yml":
@@ -200,6 +219,272 @@ class CommentCiTest(unittest.TestCase):
         run = worker(self.data, self.ci, request)
         self.complete(run)
         self.assertEqual(self.head_status()["state"], "success")
+
+    def test_completed_worker_posts_emoji_free_comment_and_replay_is_idempotent(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        self.complete(run)
+        self.assertEqual(len(self.data["result_comments"]), 1)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("[Passed] `/test`", body)
+        self.assertIn(HEAD, body)
+        self.assertIn("/actions/runs/100", body)
+        self.assertIn("Unavailable", body)
+        self.assertNotIn("✅", body)
+        calls = len([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")])
+        self.complete(run)
+        self.assertEqual(len([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")]), calls)
+
+    def test_head_change_reason_survives_replay_and_later_pr_changes(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        self.data["pr"]["head"]["sha"] = "d" * 40
+        self.complete(run)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("- Reason: PR head changed", body)
+        statuses = copy.deepcopy(self.data["statuses"])
+        writes = [c for c in self.data["calls"] if c[0] in ("POST", "PATCH")]
+        # Returning to the captured head cannot change why this result was rejected.
+        self.data["pr"]["head"]["sha"] = HEAD
+        self.complete(run)
+        self.assertEqual(self.data["result_comments"][0]["body"], body)
+        self.assertEqual(self.data["statuses"], statuses)
+        self.assertEqual([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")], writes)
+
+    def test_head_change_reason_survives_failed_comment_post_or_patch(self):
+        for method in ("POST", "PATCH"):
+            with self.subTest(method=method):
+                self.data, self.api = fixture()
+                if method == "PATCH":
+                    previous = self.accept()
+                    self.complete(worker(self.data, self.ci, previous))
+                request = self.accept(11)
+                run = worker(self.data, self.ci, request)
+                self.data["pr"]["head"]["sha"] = "d" * 40
+                route = self.ci.route_event(
+                    self.api, REPO, "workflow_run", {"action": "completed", "workflow_run": run}
+                )
+
+                def fail_comment(verb, path, body=None):
+                    if verb == method and "/comments" in path:
+                        raise RuntimeError("Comment API unavailable")
+                    return self.api(verb, path, body)
+
+                with self.assertRaisesRegex(RuntimeError, "Comment API unavailable"):
+                    self.ci.complete_worker(fail_comment, REPO, ANCHOR, route)
+                self.assertEqual(self.head_status()["state"], "error")
+                self.assertEqual(
+                    next(self.ci.state_records(self.api, REPO, ANCHOR, "1", "test")),
+                    (request, "error", "PR head changed"),
+                )
+                statuses = copy.deepcopy(self.data["statuses"])
+                self.data["pr"]["head"]["sha"] = HEAD
+                self.complete(run)
+                self.assertEqual(len(self.data["result_comments"]), 1)
+                body = self.data["result_comments"][0]["body"]
+                self.assertIn("- Reason: PR head changed", body)
+                self.assertIn("request=11;", body)
+                self.assertEqual(self.data["statuses"], statuses)
+
+    def test_terminal_failure_reasons_survive_replay(self):
+        for kind, reason in (
+            ("failure", "Worker failed"), ("cancelled", "Cancelled"),
+            ("timed_out", "Timed out"), ("identity", "Worker validation failed"),
+            ("skipped", "Worker validation failed"), ("rerun", "Unsupported rerun"),
+        ):
+            with self.subTest(kind=kind):
+                self.data, self.api = fixture()
+                request = self.accept()
+                run = worker(self.data, self.ci, request)
+                if kind == "identity":
+                    run["head_sha"] = "d" * 40
+                elif kind == "skipped":
+                    run["jobs"][1]["conclusion"] = "skipped"
+                elif kind == "rerun":
+                    self.complete(run)
+                    run["run_attempt"] = 2
+                else:
+                    run["conclusion"] = kind
+                    run["jobs"][1]["conclusion"] = kind
+                self.complete(run)
+                body = self.data["result_comments"][0]["body"]
+                self.assertIn(f"- Reason: {reason}", body)
+                statuses = copy.deepcopy(self.data["statuses"])
+                self.data["pr"]["state"] = "closed"
+                self.complete(run)
+                self.assertEqual(self.data["result_comments"][0]["body"], body)
+                self.assertEqual(self.data["statuses"], statuses)
+
+    def test_missing_worker_reason_survives_reconciliation_retry(self):
+        request = self.accept()
+
+        def missing_run(method, path, body=None):
+            if method == "GET" and path == f"repos/{REPO}/actions/runs/{request['worker']}":
+                return None
+            return self.api(method, path, body)
+
+        self.ci.reconcile(missing_run, REPO, ANCHOR, request, comments=True)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("- Reason: Worker unavailable", body)
+        statuses = copy.deepcopy(self.data["statuses"])
+        self.ci.reconcile(missing_run, REPO, ANCHOR, request, comments=True)
+        self.assertEqual(self.data["result_comments"][0]["body"], body)
+        self.assertEqual(self.data["statuses"], statuses)
+
+    def test_legacy_cursor_keeps_identity_and_uses_neutral_unknown_reason(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        self.data["pr"]["head"]["sha"] = "d" * 40
+        self.complete(run)
+        record = self.data["statuses"][ANCHOR][0]
+        record["description"] = "|".join(
+            ["v2", *(request[k] for k in ("request", "controller", "sha", "base"))]
+        )
+        statuses = copy.deepcopy(self.data["statuses"])
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "error"))
+        self.complete(run)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("- Reason: Reason unavailable", body)
+        self.assertNotIn("- Reason: Worker failed", body)
+        self.assertEqual(self.data["statuses"], statuses)
+
+    def test_legacy_pending_cursor_still_admits_its_bound_worker(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        run["status"] = "in_progress"
+        run["conclusion"] = None
+        cursor = self.data["statuses"][ANCHOR][0]
+        cursor["description"] = "|".join(
+            ["v2", *(request[k] for k in ("request", "controller", "sha", "base"))]
+        )
+        self.assertEqual(
+            self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), request["worker"]),
+            request,
+        )
+        # A new controller can cancel legacy owners and persist only its new-format request.
+        new = self.accept(11)
+        self.assertEqual(self.data["runs"][request["worker"]]["conclusion"], "cancelled")
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (new, "pending"))
+
+    def test_shared_sha_status_owner_does_not_erase_another_prs_recorded_reason(self):
+        old = self.accept()
+        run = worker(self.data, self.ci, old)
+        new = self.accept(11, pr=2)
+        self.complete(worker(self.data, self.ci, new))
+        self.data["pr"]["state"] = "closed"
+        self.complete(run)
+        body = next(c["body"] for c in self.data["result_comments"] if c["pr"] == "1")
+        self.assertIn("- Reason: PR head changed", body)
+        self.assertEqual(self.head_status()["state"], "success")
+        statuses = copy.deepcopy(self.data["statuses"])
+        self.data["pr"]["state"] = "open"
+        self.complete(run)
+        self.assertEqual(next(c["body"] for c in self.data["result_comments"] if c["pr"] == "1"), body)
+        self.assertEqual(self.data["statuses"], statuses)
+
+    def test_cursor_reason_codes_are_bounded_and_fail_closed(self):
+        event = comment(self.data, number=10**20 - 1)
+        route = self.ci.route_event(self.api, REPO, "issue_comment", event)
+        request = self.ci.accept_comment(self.api, REPO, ANCHOR, route, str(10**20 - 2))
+        self.data["pr"]["state"] = "closed"
+        self.complete(worker(self.data, self.ci, request))
+        cursor = self.data["statuses"][ANCHOR][0]
+        description = cursor["description"]
+        self.assertTrue(description.startswith("v3|"))
+        self.assertLessEqual(len(description), 140)
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "error"))
+        for bad in (
+            description.rsplit("|", 1)[0] + "|unknown",
+            description.rsplit("|", 1)[0] + "|",
+            description + "|extra",
+            description.replace("v3|", "v99|", 1),
+        ):
+            with self.subTest(description=bad):
+                cursor["description"] = bad
+                with self.assertRaisesRegex(RuntimeError, "record"):
+                    self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
+        cursor["description"] = description
+        cursor["state"] = "pending"
+        with self.assertRaisesRegex(RuntimeError, "record"):
+            self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
+
+    def test_new_result_updates_one_comment_and_old_completion_cannot_replace_it(self):
+        old = self.accept()
+        old_run = worker(self.data, self.ci, old)
+        self.complete(old_run)
+        new = self.accept(11)
+        self.complete(worker(self.data, self.ci, new, conclusion="failure"))
+        self.assertEqual(len(self.data["result_comments"]), 1)
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("[Failed] `/test`", body)
+        self.assertIn("request=11", body)
+        self.complete(old_run)
+        self.assertEqual(self.data["result_comments"][0]["body"], body)
+
+    def test_comment_failure_preserves_status_and_retries_without_duplicate(self):
+        request = self.accept()
+        run = worker(self.data, self.ci, request)
+        route = self.ci.route_event(
+            self.api, REPO, "workflow_run", {"action": "completed", "workflow_run": run}
+        )
+
+        def fail_comment(method, path, body=None):
+            if method == "POST" and path.endswith("/comments"):
+                raise RuntimeError("Comment API unavailable")
+            return self.api(method, path, body)
+
+        with self.assertRaisesRegex(RuntimeError, "Comment API unavailable"):
+            self.ci.complete_worker(fail_comment, REPO, ANCHOR, route)
+        self.assertEqual(self.head_status()["state"], "success")
+        self.ci.complete_worker(self.api, REPO, ANCHOR, route)
+        self.assertEqual(len(self.data["result_comments"]), 1)
+
+    def test_missing_or_invalid_run_dates_do_not_block_cancelled_result_comment(self):
+        for date in (None, 123, "not-a-timestamp"):
+            with self.subTest(date=date):
+                self.data, self.api = fixture()
+                request = self.accept()
+                run = worker(self.data, self.ci, request, conclusion="cancelled")
+                run["run_started_at"] = date
+                run["updated_at"] = date
+                self.complete(run)
+                self.assertEqual(self.head_status()["state"], "error")
+                self.assertIn("Duration: Unavailable", self.data["result_comments"][0]["body"])
+                self.assertIn("Cancelled", self.data["result_comments"][0]["body"])
+
+    def test_untrusted_metrics_are_advisory_and_no_raw_diagnostics_enter_comments(self):
+        from unittest.mock import patch
+        request = self.accept()
+        run = worker(self.data, self.ci, request, conclusion="failure")
+        run["jobs"][1]["id"] = 10002
+        run["run_started_at"] = "2026-01-01T00:00:00Z"
+        run["updated_at"] = "2026-01-01T00:00:42Z"
+        forged = self.ci.report.MARKER + (
+            '{"version":1,"command":"test","runs":[{"mode":"default","status":"passed",'
+            '"passed":150,"failed":0,"ignored":3,"failing_tests":[],"exit_code":0}],'
+            '"failed_stage":null}'
+        )
+        with patch.object(self.ci.job_logs, "read_job_log", return_value=forged):
+            self.complete(run)
+        self.assertEqual(self.head_status()["state"], "failure")
+        body = self.data["result_comments"][0]["body"]
+        self.assertIn("[Failed] `/test`", body)
+        self.assertIn("42s", body)
+        self.assertIn("150", body)
+        self.assertNotIn("<script>", body)
+
+    def test_partial_lint_and_cancelled_comments_are_distinct_and_nonpassing_when_needed(self):
+        for number, command, conclusion in (
+            (10, "/test-environment", "success"), (11, "/lint", "success"),
+            (12, "/test", "cancelled"),
+        ):
+            request = self.accept(number, command)
+            self.complete(worker(self.data, self.ci, request, conclusion=conclusion))
+        self.assertEqual(len(self.data["result_comments"]), 3)
+        texts = [c["body"] for c in self.data["result_comments"]]
+        self.assertTrue(any("Partial test run" in text for text in texts))
+        self.assertTrue(any("[Passed] `/lint`" in text for text in texts))
+        self.assertTrue(any("[Failed] `/test`" in text and "Cancelled" in text for text in texts))
 
     def test_skipped_execution_does_not_turn_workflow_success_into_test_success(self):
         request = self.accept()
@@ -491,10 +776,15 @@ class CommentCiTest(unittest.TestCase):
     def test_execution_calls_only_the_approved_make_targets(self):
         import json
         from unittest.mock import patch
-        with patch.object(self.ci.subprocess, "run") as run:
+
+        def captured(_args, mode):
+            return dict(mode=mode, status="passed", passed=None, failed=None, ignored=None,
+                        failing_tests=[], exit_code=0)
+
+        with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
             self.ci.execute("lint")
-            run.assert_called_once_with(["make", "lint"], check=True)
-        with patch.object(self.ci.subprocess, "run") as run:
+            run.assert_called_once_with(["make", "lint"], "lint")
+        with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
             self.ci.execute("test")
             self.assertEqual(
                 [call.args[0] for call in run.call_args_list],
@@ -505,7 +795,7 @@ class CommentCiTest(unittest.TestCase):
             "packages": [{"id": "pkg", "name": "tasks", "features": {"api-doc": []}}],
         }
         with patch.object(self.ci.subprocess, "check_output", return_value=json.dumps(metadata)):
-            with patch.object(self.ci.subprocess, "run") as run:
+            with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
                 self.ci.execute("test-tasks")
                 self.assertEqual(
                     [call.args[0] for call in run.call_args_list],
@@ -514,10 +804,10 @@ class CommentCiTest(unittest.TestCase):
                 )
             metadata["packages"][0]["features"] = {}
         with patch.object(self.ci.subprocess, "check_output", return_value=json.dumps(metadata)):
-            with patch.object(self.ci.subprocess, "run") as run:
+            with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
                 self.ci.execute("test-tasks")
                 run.assert_called_once_with(
-                    ["make", "test-crate", "CRATE=tasks", "FEATURES="], check=True
+                    ["make", "test-crate", "CRATE=tasks", "FEATURES="], "default"
                 )
                 with self.assertRaisesRegex(RuntimeError, "Unknown workspace"):
                     self.ci.execute("test-other")
