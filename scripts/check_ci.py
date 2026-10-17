@@ -1,4 +1,4 @@
-"""Validate original workflows with two narrow actionlint 1.7.12 exceptions."""
+"""Validate original workflows with one narrow actionlint 1.7.12 exception."""
 
 import json
 from pathlib import Path
@@ -8,7 +8,6 @@ import sys
 
 
 CONTROLLER = ".github/workflows/ci-command.yml"
-COMPLETION = ".github/workflows/ci-command-completion.yml"
 MESSAGE = 'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'
 MAPPING = [
     "    concurrency:",
@@ -18,9 +17,9 @@ MAPPING = [
 ]
 
 
-def permitted_line(root, workflow):
+def permitted_line(root):
     """Recognize only the canonical block directly inside jobs.control."""
-    lines = (root / workflow).read_text().splitlines()
+    lines = (root / CONTROLLER).read_text().splitlines()
     sites = []
     job = None
     section = None
@@ -67,21 +66,16 @@ def check(root):
                 raise ValueError("unrecognized actionlint diagnostic")
         if (result.returncode == 0) != (len(errors) == 0):
             raise ValueError("actionlint exit code disagrees with diagnostic output")
-        permitted = []
-        for workflow in (CONTROLLER, COMPLETION):
-            if not any(error["filepath"] == workflow for error in errors):
-                continue
-            line = permitted_line(root, workflow)
-            matches = [
-                error for error in errors
-                if error["message"] == MESSAGE and error["kind"] == "syntax-check"
-                and error["filepath"] == workflow and error["line"] == line
-                and error["column"] == 7
-            ]
-            if len(matches) == 1:
-                permitted.extend(matches)
-        remaining = [error for error in errors
-                     if not any(error is allowed for allowed in permitted)]
+        line = permitted_line(root) if errors else None
+        permitted = [
+            error for error in errors
+            if error["message"] == MESSAGE and error["kind"] == "syntax-check"
+            and error["filepath"] == CONTROLLER and error["line"] == line
+            and error["column"] == 7
+        ]
+        remaining = errors if len(permitted) != 1 else [
+            error for error in errors if error is not permitted[0]
+        ]
         if remaining:
             for error in remaining:
                 print(f'{error["filepath"]}:{error["line"]}:{error["column"]}: '

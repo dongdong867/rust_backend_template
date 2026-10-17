@@ -84,32 +84,19 @@ class CiPolicyTest(unittest.TestCase):
         self.assertNotIn("persist-credentials: true", text)
         self.assertIn("ci-command-control-", text)
 
-    def test_completion_is_trusted_and_shares_dispatcher_writer_lock(self):
-        text = self.workflow("ci-command-completion.yml")
-        self.assertTrue(text.startswith("name: CI command completion\n"))
-        self.assertIn("workflows: ['CI command worker', 'ci-command *']", text)
-        self.assertIn("types: [completed]", text)
-        self.assertNotIn("workflow_dispatch:", text)
-        self.assertNotIn("issue_comment:", text)
-        self.assertIn("permissions: {}", text)
-        route, control = text.split("  control:\n")
-        self.assertNotIn(": write", route)
-        self.assertIn("pull-requests: write", control)
-        self.assertIn("statuses: write", control)
-        self.assertIn("actions: read", control)
-        self.assertNotIn("actions: write", text)
-        for name in ("ci-command.yml", "ci-command-completion.yml"):
-            workflow = self.workflow(name)
-            self.assertEqual(workflow.count(
-                "    concurrency:\n"
-                "      group: ci-command-control-${{ needs.route.outputs.group }}\n"
-                "      cancel-in-progress: false\n"
-                "      queue: max\n"), 1)
-            self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 2)
-            self.assertIn("comment_ci.py route", workflow)
-            self.assertIn("comment_ci.py control", workflow)
-            for forbidden in ("secrets.", "download-artifact", "inputs.sha", "make "):
-                self.assertNotIn(forbidden, workflow)
+    def test_actions_only_controller_keeps_its_trusted_acceptance_lock(self):
+        workflow = self.workflow("ci-command.yml")
+        self.assertEqual(workflow.count(
+            "    concurrency:\n"
+            "      group: ci-command-control-${{ needs.route.outputs.group }}\n"
+            "      cancel-in-progress: false\n"
+            "      queue: max\n"), 1)
+        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 2)
+        self.assertIn("comment_ci.py route", workflow)
+        self.assertIn("comment_ci.py control", workflow)
+        for forbidden in ("secrets.", "download-artifact", "inputs.sha", "make ",
+                          "workflow_run:", "pull-requests: write"):
+            self.assertNotIn(forbidden, workflow)
 
     def test_command_worker_has_non_cancelling_admission_and_no_write_permissions(self):
         text = self.workflow("ci-command-worker.yml")
@@ -127,6 +114,7 @@ class CiPolicyTest(unittest.TestCase):
         self.assertIn("ref: ${{ inputs.sha }}", text)
         self.assertIn("persist-credentials: false", text)
         self.assertIn("worker-check", text)
+        self.assertEqual(text.count("comment_ci.py worker-check"), 2)
         self.assertIn("comment_ci.py execute", text)
         # Expressions belong in step environment, not shell text.
         self.assertNotRegex(text, r"run:.*\$\{\{")
@@ -158,6 +146,14 @@ class CiPolicyTest(unittest.TestCase):
             self.assertIn("For private repositories", text)
             self.assertIn("without write permission", text)
 
+    def test_actions_only_guidance_does_not_promise_reports_or_required_statuses(self):
+        for name in ("README.md", "README.md.liquid"):
+            text = (ROOT / name).read_text()
+            self.assertIn("Results are available in GitHub Actions", text)
+            self.assertNotIn("Completed runs receive one updated bot result comment", text)
+            self.assertNotIn("require only **`ci-comment /test`**", text)
+            self.assertIn("Historical `ci-comment` statuses", text)
+
     def test_tool_versions_come_from_make(self):
         result = subprocess.check_output(
             ["make", "--no-print-directory", "tool-versions"], cwd=ROOT, text=True
@@ -184,8 +180,6 @@ class GeneratedCiTest(unittest.TestCase):
         self.files = (
             ".github/workflows/format.yml", ".github/dependabot.yml",
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
-            ".github/workflows/ci-command-completion.yml", ".github/ci/command_report.py",
-            ".github/ci/github_log.py",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
         )
         for name in self.files:
@@ -204,11 +198,14 @@ class GeneratedCiTest(unittest.TestCase):
     def test_actual_shared_command_support_exists(self):
         for name in (
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
-            ".github/workflows/ci-command-completion.yml", ".github/ci/command_report.py",
-            ".github/ci/github_log.py",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
         ):
             self.assertTrue((ROOT / name).is_file(), f"Missing shared command support: {name}")
+        for name in (
+            ".github/workflows/ci-command-completion.yml", ".github/ci/command_report.py",
+            ".github/ci/github_log.py",
+        ):
+            self.assertFalse((ROOT / name).exists(), f"Deferred reporting support remains: {name}")
 
     def test_missing_or_changed_config_is_rejected(self):
         for name in self.files:
