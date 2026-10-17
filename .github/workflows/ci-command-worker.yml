@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -60,7 +60,7 @@ jobs:
     timeout-minutes: 30
     # No automatic admission cancellation: only the controller cancels known obsolete owners.
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: trusted
@@ -72,7 +72,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           COMMAND_INPUTS: ${{ toJson(inputs) }}
         run: python3 .github/ci/comment_ci.py worker-check
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.sha }}
           path: pr
@@ -92,7 +92,7 @@ jobs:
         run: rustup show active-toolchain
       - name: Install prebuilt Taplo for lint only
         if: inputs.command == 'lint'
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: taplo@${{ steps.tools.outputs.taplo }}
           fallback: none
