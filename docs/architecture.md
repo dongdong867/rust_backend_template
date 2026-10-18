@@ -97,11 +97,12 @@ For required commands and when to run them, see [AGENTS.md](../AGENTS.md#command
 
 ## Maintainer-requested CI
 
-The command controller accepts and reports requests using only trusted default-branch code.
+The command controller accepts requests using only trusted default-branch code; users inspect results in GitHub Actions.
 PR evaluation belongs exclusively to read-only hosted workers with no production secrets or shared writable cache.
-Acceptance, cancellation and all status writes share one non-cancelling repository/command lock.
+Acceptance, cancellation and internal bookkeeping writes share one non-cancelling repository/command lock.
 Workers never automatically cancel each other; the controller cancels only bound obsolete run IDs for the same PR and command.
 Durable request cursors on the single repository root commit preserve ordering across head updates.
-Shared SHA/command statuses belong to the newest accepted request, even across PRs; per-PR execution remains independent.
-Only the full-test status can satisfy branch protection; partial and lint results remain separate.
-See [command security and hosted validation](ci-commands.md) before changing this boundary or enabling required checks.
+Legacy v2/v3 cursors remain readable; they record ownership, not test results or merge eligibility.
+Routing and acceptance reject edited comments using explicit GitHub edit metadata, including same-second edits.
+No custom PR-result status or bot report is published, and command runs are not a configured required-check gate.
+See [command security and hosted validation](ci-commands.md) before changing these boundaries.

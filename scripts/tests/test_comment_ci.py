@@ -1,9 +1,12 @@
-"""Exercise command acceptance and reporting through a fake GitHub API, not PR code."""
+"""Exercise Actions-only acceptance and worker safety without executing PR code."""
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,18 +23,22 @@ def fixture():
         "permission": "write",
         "pr": {"state": "open", "head": {"sha": HEAD}},
         "prs": {"2": {"state": "open", "head": {"sha": HEAD}}},
-        "comments": {},
-        "result_comments": [],
-        "next_comment": 2000,
-        "statuses": {},
-        "runs": {},
-        "next_run": 100,
-        "calls": [],
+        "comments": {}, "last_edited": {}, "statuses": {}, "runs": {},
+        "next_run": 100, "calls": [],
     }
 
     def api(method, path, body=None):
         data["calls"].append((method, path, copy.deepcopy(body)))
         prefix = f"repos/{REPO}"
+        if method == "POST" and path == "graphql":
+            value = next(
+                (c for c in data["comments"].values()
+                 if c.get("node_id") == body["variables"]["id"]), None,
+            )
+            return {"data": {"node": None if value is None else {
+                "id": value["node_id"], "databaseId": value["id"], "body": value["body"],
+                "lastEditedAt": data["last_edited"].get(str(value["id"])),
+            }}}
         if method == "GET" and path == prefix:
             return {"id": 42, "default_branch": "main"}
         if method == "GET" and "/collaborators/" in path:
@@ -40,24 +47,7 @@ def fixture():
             pr = path.rsplit("/", 1)[1]
             return copy.deepcopy(data["pr"] if pr == "1" else data["prs"][pr])
         if method == "GET" and "/issues/comments/" in path:
-            return copy.deepcopy(data["comments"][path.rsplit("/", 1)[1]])
-        if method == "GET" and "/issues/" in path and "/comments?" in path:
-            pr = path.split("/issues/")[1].split("/")[0]
-            return copy.deepcopy([c for c in data["result_comments"] if c["pr"] == pr])
-        if method == "POST" and "/issues/" in path and path.endswith("/comments"):
-            pr = path.split("/issues/")[1].split("/")[0]
-            value = {
-                "id": data["next_comment"], "pr": pr, "body": body["body"],
-                "user": {"login": "github-actions[bot]", "type": "Bot"},
-            }
-            data["next_comment"] += 1
-            data["result_comments"].append(value)
-            data["comments"][str(value["id"])] = value
-            return copy.deepcopy(value)
-        if method == "PATCH" and "/issues/comments/" in path:
-            value = data["comments"][path.rsplit("/", 1)[1]]
-            value["body"] = body["body"]
-            return copy.deepcopy(value)
+            return copy.deepcopy(data["comments"].get(path.rsplit("/", 1)[1], {}))
         if method == "GET" and path == f"{prefix}/commits/main":
             return {"sha": BASE}
         if method == "GET" and path == f"{prefix}/actions/workflows/ci-command-worker.yml":
@@ -82,7 +72,7 @@ def fixture():
                 "display_title": "ci-command " + " ".join(
                     inputs[key] for key in ("pr", "command", "sha", "request", "controller", "base")
                 ),
-                "status": "queued", "conclusion": None, "jobs": [],
+                "status": "queued", "conclusion": None,
             }
             return {"workflow_run_id": run_id}
         if method == "POST" and path.endswith("/cancel"):
@@ -90,13 +80,8 @@ def fixture():
             data["runs"][run_id]["status"] = "completed"
             data["runs"][run_id]["conclusion"] = "cancelled"
             return None
-        if method == "GET" and "/attempts/1/jobs?" in path:
-            run_id = path.split("/runs/")[1].split("/")[0]
-            return {"jobs": copy.deepcopy(data["runs"][run_id]["jobs"])}
         if method == "GET" and "/actions/runs/" in path:
             return copy.deepcopy(data["runs"][path.rsplit("/", 1)[1]])
-        if method == "GET" and "/actions/workflows/ci-command-worker.yml/runs?" in path:
-            return {"workflow_runs": copy.deepcopy(list(data["runs"].values()))}
         raise AssertionError(f"Unexpected API call: {method} {path}")
 
     return data, api
@@ -105,6 +90,8 @@ def fixture():
 def comment(data, number=10, command="/test", pr=1):
     value = {
         "id": number, "body": command, "user": {"login": "alice"},
+        "node_id": f"IC_{number}",
+        "created_at": "2026-10-15T03:04:21Z", "updated_at": "2026-10-15T03:04:21Z",
         "issue_url": f"https://api.github.com/repos/{REPO}/issues/{pr}",
     }
     data["comments"][str(number)] = value
@@ -114,26 +101,8 @@ def comment(data, number=10, command="/test", pr=1):
     }
 
 
-def worker(data, ci, request, number=None, conclusion="success"):
-    number = int(request["worker"]) if number is None else number
-    value = {
-        "id": number, "workflow_id": 55, "path": WORKFLOW,
-        "event": "workflow_dispatch", "head_branch": "main", "head_sha": BASE,
-        "repository": {"full_name": REPO}, "run_attempt": 1,
-        "display_title": ci.run_title(request),
-        "status": "completed", "conclusion": conclusion,
-        "jobs": [
-            {"name": "Validate accepted request", "conclusion": "success"},
-            {"name": "Run PR command", "conclusion": conclusion},
-        ],
-    }
-    data["runs"][str(number)] = value
-    return value
-
-
 class CommentCiTest(unittest.TestCase):
     def setUp(self):
-        self.assertTrue(SCRIPT.is_file(), "Trusted command controller is missing")
         spec = importlib.util.spec_from_file_location("comment_ci", SCRIPT)
         self.ci = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.ci)
@@ -144,17 +113,8 @@ class CommentCiTest(unittest.TestCase):
         route = self.ci.route_event(self.api, REPO, "issue_comment", event)
         return self.ci.accept_comment(self.api, REPO, ANCHOR, route, "90")
 
-    def complete(self, run):
-        route = self.ci.route_event(
-            self.api, REPO, "workflow_run", {"action": "completed", "workflow_run": run}
-        )
-        return self.ci.complete_worker(self.api, REPO, ANCHOR, route)
-
-    def head_status(self, command="test", sha=HEAD):
-        context = self.ci.status_context(command)
-        return next(
-            status for status in self.data["statuses"][sha] if status["context"] == context
-        )
+    def mutations(self):
+        return [call for call in self.data["calls"] if call[0] != "GET" and call[1] != "graphql"]
 
     def test_only_three_exact_command_forms(self):
         for text, expected in (
@@ -177,7 +137,7 @@ class CommentCiTest(unittest.TestCase):
         for permission in ("write", "maintain", "admin"):
             self.data["permission"] = permission
             self.assertIsNotNone(self.ci.route_event(self.api, REPO, "issue_comment", event))
-        self.assertFalse(any(method == "POST" for method, _, _ in self.data["calls"]))
+        self.assertFalse(self.mutations())
 
     def test_issues_edits_and_closed_prs_do_not_accept(self):
         event = comment(self.data)
@@ -189,22 +149,26 @@ class CommentCiTest(unittest.TestCase):
         event["issue"]["pull_request"] = {}
         self.data["pr"]["state"] = "closed"
         self.assertIsNone(self.ci.route_event(self.api, REPO, "issue_comment", event))
+        self.assertFalse(self.mutations())
 
-    def test_acceptance_records_exact_head_before_pending_and_dispatch(self):
+    def test_actions_only_acceptance_records_head_and_binds_worker_without_public_status(self):
         request = self.accept()
         self.assertEqual(request["sha"], HEAD)
-        posts = [(path, body) for method, path, body in self.data["calls"] if method == "POST"]
-        self.assertTrue(posts[0][0].endswith(f"/statuses/{ANCHOR}"))
-        self.assertTrue(posts[1][0].endswith(f"/statuses/{HEAD}"))
-        self.assertEqual(self.head_status()["state"], "pending")
-        self.assertEqual(posts[2][1], {"ref": "main", "inputs": self.ci.payload(request)})
         self.assertEqual(request["worker"], "100")
-        record, state = self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
-        self.assertEqual(record, request)
-        self.assertEqual(state, "pending")
-        self.assertLessEqual(len(posts[0][1]["description"]), 140)
+        posts = [(path, body) for method, path, body in self.mutations() if method == "POST"]
+        self.assertEqual(len(posts), 3)
+        self.assertTrue(posts[0][0].endswith(f"/statuses/{ANCHOR}"))
+        self.assertTrue(posts[1][0].endswith("/dispatches"))
+        self.assertEqual(posts[1][1], {"ref": "main", "inputs": self.ci.payload(request)})
+        self.assertTrue(posts[2][0].endswith(f"/statuses/{ANCHOR}"))
+        for path, body in (posts[0], posts[2]):
+            self.assertTrue(body["context"].startswith("ci-command-state/"))
+            self.assertLessEqual(len(body["description"]), 140)
+        self.assertNotIn(HEAD, self.data["statuses"])
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "pending"))
+        # The fake API refuses all comment POST/PATCH and PR-head status calls are explicitly absent.
 
-    def test_authorization_and_comment_are_rechecked_inside_controller(self):
+    def test_authorization_comment_and_deleted_comment_are_rechecked_inside_controller(self):
         event = comment(self.data)
         route = self.ci.route_event(self.api, REPO, "issue_comment", event)
         self.data["permission"] = "read"
@@ -212,373 +176,130 @@ class CommentCiTest(unittest.TestCase):
         self.data["permission"] = "write"
         self.data["comments"]["10"]["body"] = "/lint"
         self.assertIsNone(self.ci.accept_comment(self.api, REPO, ANCHOR, route, "90"))
-        self.assertNotIn(HEAD, self.data["statuses"])
+        del self.data["comments"]["10"]
+        self.assertIsNone(self.ci.accept_comment(self.api, REPO, ANCHOR, route, "90"))
+        self.assertFalse(self.mutations())
 
-    def test_success_requires_both_expected_jobs(self):
-        request = self.accept()
-        run = worker(self.data, self.ci, request)
-        self.complete(run)
-        self.assertEqual(self.head_status()["state"], "success")
-
-    def test_completed_worker_posts_emoji_free_comment_and_replay_is_idempotent(self):
-        request = self.accept()
-        run = worker(self.data, self.ci, request)
-        self.complete(run)
-        self.assertEqual(len(self.data["result_comments"]), 1)
-        body = self.data["result_comments"][0]["body"]
-        self.assertIn("[Passed] `/test`", body)
-        self.assertIn(HEAD, body)
-        self.assertIn("/actions/runs/100", body)
-        self.assertIn("Unavailable", body)
-        self.assertNotIn("✅", body)
-        calls = len([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")])
-        self.complete(run)
-        self.assertEqual(len([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")]), calls)
-
-    def test_head_change_reason_survives_replay_and_later_pr_changes(self):
-        request = self.accept()
-        run = worker(self.data, self.ci, request)
-        self.data["pr"]["head"]["sha"] = "d" * 40
-        self.complete(run)
-        body = self.data["result_comments"][0]["body"]
-        self.assertIn("- Reason: PR head changed", body)
-        statuses = copy.deepcopy(self.data["statuses"])
-        writes = [c for c in self.data["calls"] if c[0] in ("POST", "PATCH")]
-        # Returning to the captured head cannot change why this result was rejected.
-        self.data["pr"]["head"]["sha"] = HEAD
-        self.complete(run)
-        self.assertEqual(self.data["result_comments"][0]["body"], body)
-        self.assertEqual(self.data["statuses"], statuses)
-        self.assertEqual([c for c in self.data["calls"] if c[0] in ("POST", "PATCH")], writes)
-
-    def test_head_change_reason_survives_failed_comment_post_or_patch(self):
-        for method in ("POST", "PATCH"):
-            with self.subTest(method=method):
+    def test_created_event_with_edited_body_is_rejected_even_with_same_second_timestamps(self):
+        for edited_at in ("2026-10-15T03:04:21Z", "2026-10-15T03:04:22Z"):
+            with self.subTest(edited_at=edited_at):
                 self.data, self.api = fixture()
-                if method == "PATCH":
-                    previous = self.accept()
-                    self.complete(worker(self.data, self.ci, previous))
-                request = self.accept(11)
-                run = worker(self.data, self.ci, request)
-                self.data["pr"]["head"]["sha"] = "d" * 40
-                route = self.ci.route_event(
-                    self.api, REPO, "workflow_run", {"action": "completed", "workflow_run": run}
-                )
+                event = comment(self.data)
+                self.data["last_edited"]["10"] = edited_at
+                self.assertIsNone(self.ci.route_event(self.api, REPO, "issue_comment", event))
+                self.assertFalse(self.mutations())
 
-                def fail_comment(verb, path, body=None):
-                    if verb == method and "/comments" in path:
-                        raise RuntimeError("Comment API unavailable")
-                    return self.api(verb, path, body)
-
-                with self.assertRaisesRegex(RuntimeError, "Comment API unavailable"):
-                    self.ci.complete_worker(fail_comment, REPO, ANCHOR, route)
-                self.assertEqual(self.head_status()["state"], "error")
-                self.assertEqual(
-                    next(self.ci.state_records(self.api, REPO, ANCHOR, "1", "test")),
-                    (request, "error", "PR head changed"),
-                )
-                statuses = copy.deepcopy(self.data["statuses"])
-                self.data["pr"]["head"]["sha"] = HEAD
-                self.complete(run)
-                self.assertEqual(len(self.data["result_comments"]), 1)
-                body = self.data["result_comments"][0]["body"]
-                self.assertIn("- Reason: PR head changed", body)
-                self.assertIn("request=11;", body)
-                self.assertEqual(self.data["statuses"], statuses)
-
-    def test_terminal_failure_reasons_survive_replay(self):
-        for kind, reason in (
-            ("failure", "Worker failed"), ("cancelled", "Cancelled"),
-            ("timed_out", "Timed out"), ("identity", "Worker validation failed"),
-            ("skipped", "Worker validation failed"), ("rerun", "Unsupported rerun"),
-        ):
-            with self.subTest(kind=kind):
-                self.data, self.api = fixture()
-                request = self.accept()
-                run = worker(self.data, self.ci, request)
-                if kind == "identity":
-                    run["head_sha"] = "d" * 40
-                elif kind == "skipped":
-                    run["jobs"][1]["conclusion"] = "skipped"
-                elif kind == "rerun":
-                    self.complete(run)
-                    run["run_attempt"] = 2
-                else:
-                    run["conclusion"] = kind
-                    run["jobs"][1]["conclusion"] = kind
-                self.complete(run)
-                body = self.data["result_comments"][0]["body"]
-                self.assertIn(f"- Reason: {reason}", body)
-                statuses = copy.deepcopy(self.data["statuses"])
-                self.data["pr"]["state"] = "closed"
-                self.complete(run)
-                self.assertEqual(self.data["result_comments"][0]["body"], body)
-                self.assertEqual(self.data["statuses"], statuses)
-
-    def test_missing_worker_reason_survives_reconciliation_retry(self):
-        request = self.accept()
-
-        def missing_run(method, path, body=None):
-            if method == "GET" and path == f"repos/{REPO}/actions/runs/{request['worker']}":
-                return None
-            return self.api(method, path, body)
-
-        self.ci.reconcile(missing_run, REPO, ANCHOR, request, comments=True)
-        body = self.data["result_comments"][0]["body"]
-        self.assertIn("- Reason: Worker unavailable", body)
-        statuses = copy.deepcopy(self.data["statuses"])
-        self.ci.reconcile(missing_run, REPO, ANCHOR, request, comments=True)
-        self.assertEqual(self.data["result_comments"][0]["body"], body)
-        self.assertEqual(self.data["statuses"], statuses)
-
-    def test_legacy_cursor_keeps_identity_and_uses_neutral_unknown_reason(self):
-        request = self.accept()
-        run = worker(self.data, self.ci, request)
-        self.data["pr"]["head"]["sha"] = "d" * 40
-        self.complete(run)
-        record = self.data["statuses"][ANCHOR][0]
-        record["description"] = "|".join(
-            ["v2", *(request[k] for k in ("request", "controller", "sha", "base"))]
-        )
-        statuses = copy.deepcopy(self.data["statuses"])
-        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "error"))
-        self.complete(run)
-        body = self.data["result_comments"][0]["body"]
-        self.assertIn("- Reason: Reason unavailable", body)
-        self.assertNotIn("- Reason: Worker failed", body)
-        self.assertEqual(self.data["statuses"], statuses)
-
-    def test_legacy_pending_cursor_still_admits_its_bound_worker(self):
-        request = self.accept()
-        run = worker(self.data, self.ci, request)
-        run["status"] = "in_progress"
-        run["conclusion"] = None
-        cursor = self.data["statuses"][ANCHOR][0]
-        cursor["description"] = "|".join(
-            ["v2", *(request[k] for k in ("request", "controller", "sha", "base"))]
-        )
-        self.assertEqual(
-            self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), request["worker"]),
-            request,
-        )
-        # A new controller can cancel legacy owners and persist only its new-format request.
-        new = self.accept(11)
-        self.assertEqual(self.data["runs"][request["worker"]]["conclusion"], "cancelled")
-        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (new, "pending"))
-
-    def test_shared_sha_status_owner_does_not_erase_another_prs_recorded_reason(self):
-        old = self.accept()
-        run = worker(self.data, self.ci, old)
-        new = self.accept(11, pr=2)
-        self.complete(worker(self.data, self.ci, new))
-        self.data["pr"]["state"] = "closed"
-        self.complete(run)
-        body = next(c["body"] for c in self.data["result_comments"] if c["pr"] == "1")
-        self.assertIn("- Reason: PR head changed", body)
-        self.assertEqual(self.head_status()["state"], "success")
-        statuses = copy.deepcopy(self.data["statuses"])
-        self.data["pr"]["state"] = "open"
-        self.complete(run)
-        self.assertEqual(next(c["body"] for c in self.data["result_comments"] if c["pr"] == "1"), body)
-        self.assertEqual(self.data["statuses"], statuses)
-
-    def test_cursor_reason_codes_are_bounded_and_fail_closed(self):
-        event = comment(self.data, number=10**20 - 1)
+    def test_comment_edited_after_routing_is_rejected_by_acceptance_recheck(self):
+        event = comment(self.data)
         route = self.ci.route_event(self.api, REPO, "issue_comment", event)
-        request = self.ci.accept_comment(self.api, REPO, ANCHOR, route, str(10**20 - 2))
-        self.data["pr"]["state"] = "closed"
-        self.complete(worker(self.data, self.ci, request))
-        cursor = self.data["statuses"][ANCHOR][0]
-        description = cursor["description"]
-        self.assertTrue(description.startswith("v3|"))
-        self.assertLessEqual(len(description), 140)
-        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "error"))
-        for bad in (
-            description.rsplit("|", 1)[0] + "|unknown",
-            description.rsplit("|", 1)[0] + "|",
-            description + "|extra",
-            description.replace("v3|", "v99|", 1),
-        ):
-            with self.subTest(description=bad):
-                cursor["description"] = bad
-                with self.assertRaisesRegex(RuntimeError, "record"):
-                    self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
-        cursor["description"] = description
-        cursor["state"] = "pending"
-        with self.assertRaisesRegex(RuntimeError, "record"):
-            self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
+        self.assertIsNotNone(route)
+        self.data["last_edited"]["10"] = "2026-10-15T03:04:21Z"
+        self.assertIsNone(self.ci.accept_comment(self.api, REPO, ANCHOR, route, "90"))
+        self.assertFalse(self.mutations())
 
-    def test_new_result_updates_one_comment_and_old_completion_cannot_replace_it(self):
-        old = self.accept()
-        old_run = worker(self.data, self.ci, old)
-        self.complete(old_run)
-        new = self.accept(11)
-        self.complete(worker(self.data, self.ci, new, conclusion="failure"))
-        self.assertEqual(len(self.data["result_comments"]), 1)
-        body = self.data["result_comments"][0]["body"]
-        self.assertIn("[Failed] `/test`", body)
-        self.assertIn("request=11", body)
-        self.complete(old_run)
-        self.assertEqual(self.data["result_comments"][0]["body"], body)
+    def test_comment_edited_during_request_preparation_is_rechecked_before_bookkeeping(self):
+        event = comment(self.data)
+        route = self.ci.route_event(self.api, REPO, "issue_comment", event)
 
-    def test_comment_failure_preserves_status_and_retries_without_duplicate(self):
-        request = self.accept()
-        run = worker(self.data, self.ci, request)
-        route = self.ci.route_event(
-            self.api, REPO, "workflow_run", {"action": "completed", "workflow_run": run}
-        )
-
-        def fail_comment(method, path, body=None):
-            if method == "POST" and path.endswith("/comments"):
-                raise RuntimeError("Comment API unavailable")
+        def edited_during_lookup(method, path, body=None):
+            if path == f"repos/{REPO}/commits/main":
+                self.data["last_edited"]["10"] = "2026-10-15T03:04:21Z"
             return self.api(method, path, body)
 
-        with self.assertRaisesRegex(RuntimeError, "Comment API unavailable"):
-            self.ci.complete_worker(fail_comment, REPO, ANCHOR, route)
-        self.assertEqual(self.head_status()["state"], "success")
-        self.ci.complete_worker(self.api, REPO, ANCHOR, route)
-        self.assertEqual(len(self.data["result_comments"]), 1)
+        self.assertIsNone(self.ci.accept_comment(
+            edited_during_lookup, REPO, ANCHOR, route, "90"
+        ))
+        self.assertFalse(self.mutations())
 
-    def test_missing_or_invalid_run_dates_do_not_block_cancelled_result_comment(self):
-        for date in (None, 123, "not-a-timestamp"):
-            with self.subTest(date=date):
+    def test_edit_query_is_read_only_and_binds_the_comment_node(self):
+        event = comment(self.data)
+        self.assertIsNotNone(self.ci.route_event(self.api, REPO, "issue_comment", event))
+        queries = [body for method, path, body in self.data["calls"]
+                   if method == "POST" and path == "graphql"]
+        self.assertEqual(len(queries), 1)
+        self.assertEqual(queries[0]["variables"], {"id": "IC_10"})
+        self.assertIn("lastEditedAt", queries[0]["query"])
+        self.assertNotIn("mutation", queries[0]["query"])
+        self.assertFalse(self.mutations())
+
+    def test_missing_or_invalid_comment_node_id_is_rejected(self):
+        for node_id in (None, 10, "", "x" * 201):
+            with self.subTest(node_id=node_id):
                 self.data, self.api = fixture()
-                request = self.accept()
-                run = worker(self.data, self.ci, request, conclusion="cancelled")
-                run["run_started_at"] = date
-                run["updated_at"] = date
-                self.complete(run)
-                self.assertEqual(self.head_status()["state"], "error")
-                self.assertIn("Duration: Unavailable", self.data["result_comments"][0]["body"])
-                self.assertIn("Cancelled", self.data["result_comments"][0]["body"])
+                event = comment(self.data)
+                event["comment"]["node_id"] = node_id
+                self.assertIsNone(self.ci.route_event(self.api, REPO, "issue_comment", event))
+                self.assertFalse(self.mutations())
 
-    def test_untrusted_metrics_are_advisory_and_no_raw_diagnostics_enter_comments(self):
-        from unittest.mock import patch
-        request = self.accept()
-        run = worker(self.data, self.ci, request, conclusion="failure")
-        run["jobs"][1]["id"] = 10002
-        run["run_started_at"] = "2026-01-01T00:00:00Z"
-        run["updated_at"] = "2026-01-01T00:00:42Z"
-        forged = self.ci.report.MARKER + (
-            '{"version":1,"command":"test","runs":[{"mode":"default","status":"passed",'
-            '"passed":150,"failed":0,"ignored":3,"failing_tests":[],"exit_code":0}],'
-            '"failed_stage":null}'
-        )
-        with patch.object(self.ci.job_logs, "read_job_log", return_value=forged):
-            self.complete(run)
-        self.assertEqual(self.head_status()["state"], "failure")
-        body = self.data["result_comments"][0]["body"]
-        self.assertIn("[Failed] `/test`", body)
-        self.assertIn("42s", body)
-        self.assertIn("150", body)
-        self.assertNotIn("<script>", body)
-
-    def test_partial_lint_and_cancelled_comments_are_distinct_and_nonpassing_when_needed(self):
-        for number, command, conclusion in (
-            (10, "/test-environment", "success"), (11, "/lint", "success"),
-            (12, "/test", "cancelled"),
-        ):
-            request = self.accept(number, command)
-            self.complete(worker(self.data, self.ci, request, conclusion=conclusion))
-        self.assertEqual(len(self.data["result_comments"]), 3)
-        texts = [c["body"] for c in self.data["result_comments"]]
-        self.assertTrue(any("Partial test run" in text for text in texts))
-        self.assertTrue(any("[Passed] `/lint`" in text for text in texts))
-        self.assertTrue(any("[Failed] `/test`" in text and "Cancelled" in text for text in texts))
-
-    def test_skipped_execution_does_not_turn_workflow_success_into_test_success(self):
-        request = self.accept()
-        run = worker(self.data, self.ci, request)
-        run["jobs"][1]["conclusion"] = "skipped"
-        self.complete(run)
-        self.assertEqual(self.head_status()["state"], "error")
-
-    def test_failures_cancellations_and_timeouts_are_nonpassing(self):
-        for conclusion, expected in (
-            ("failure", "failure"), ("cancelled", "error"), ("timed_out", "error"),
-        ):
-            with self.subTest(conclusion=conclusion):
+    def test_unknown_or_mismatched_edit_metadata_fails_closed_at_both_checks(self):
+        valid = {"id": "IC_10", "databaseId": 10, "body": "/test", "lastEditedAt": None}
+        bad_nodes = [
+            None, [], {}, {k: v for k, v in valid.items() if k != "lastEditedAt"},
+            {**valid, "id": "IC_other"}, {**valid, "databaseId": 11},
+            {**valid, "databaseId": True}, {**valid, "databaseId": 10.0},
+            {**valid, "body": "/lint"}, {**valid, "lastEditedAt": False},
+        ]
+        responses = [None, [], {}, {"data": None}, {"data": []}]
+        responses += [{"data": {"node": node}} for node in bad_nodes]
+        responses += [
+            {"data": {"node": valid}, "errors": [{"message": "private API detail"}]},
+            {"data": {"node": valid}, "errors": False},
+        ]
+        for response in responses:
+            with self.subTest(response=response):
                 self.data, self.api = fixture()
-                request = self.accept()
-                self.complete(worker(self.data, self.ci, request, conclusion=conclusion))
-                self.assertEqual(self.head_status()["state"], expected)
+                event = comment(self.data)
 
-    def test_new_request_pending_cannot_be_overwritten_by_old_success(self):
-        old = self.accept()
-        new = self.accept(11)
-        self.complete(worker(self.data, self.ci, old, 100))
-        self.assertEqual(self.head_status()["state"], "pending")
-        self.complete(worker(self.data, self.ci, new, 101))
-        self.assertEqual(self.head_status()["state"], "success")
-        count = len(self.data["statuses"][HEAD])
-        self.complete(self.data["runs"]["100"])
-        self.assertEqual(len(self.data["statuses"][HEAD]), count)
+                def bad_api(method, path, body=None):
+                    if path == "graphql":
+                        return copy.deepcopy(response)
+                    return self.api(method, path, body)
 
-    def test_cursor_is_monotonic_even_across_head_changes_and_delayed_comments(self):
-        new = self.accept(11)
+                self.assertIsNone(self.ci.route_event(bad_api, REPO, "issue_comment", event))
+                route = self.ci.route_event(self.api, REPO, "issue_comment", event)
+                self.assertIsNotNone(route)
+                self.assertIsNone(self.ci.accept_comment(bad_api, REPO, ANCHOR, route, "90"))
+                self.assertFalse(self.mutations())
+
+    def test_edit_api_failure_cannot_dispatch(self):
+        event = comment(self.data)
+        route = self.ci.route_event(self.api, REPO, "issue_comment", event)
+
+        def unavailable(method, path, body=None):
+            if path == "graphql":
+                raise RuntimeError("GitHub API request failed.")
+            return self.api(method, path, body)
+
+        for stage in (
+            lambda: self.ci.route_event(unavailable, REPO, "issue_comment", event),
+            lambda: self.ci.accept_comment(unavailable, REPO, ANCHOR, route, "90"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "GitHub API request failed"):
+                stage()
+        self.assertFalse(self.mutations())
+
+    def test_completion_events_are_ignored_without_api_calls(self):
+        self.assertIsNone(self.ci.route_event(
+            self.api, REPO, "workflow_run", {"action": "completed", "workflow_run": {"id": 100}}
+        ))
+        self.assertFalse(self.data["calls"])
+
+    def test_cursor_is_monotonic_across_delayed_comments_and_controller_reruns(self):
+        request = self.accept(11)
         self.data["pr"]["head"]["sha"] = "d" * 40
+        writes = copy.deepcopy(self.mutations())
         self.assertIsNone(self.accept(10))
-        self.assertNotIn("d" * 40, self.data["statuses"])
-        self.assertEqual(new["request"], "11")
+        self.assertIsNone(self.accept(11))
+        self.assertEqual(self.mutations(), writes)
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "pending"))
 
-    def test_head_change_never_gets_an_old_success(self):
-        request = self.accept()
-        self.data["pr"]["head"]["sha"] = "d" * 40
-        self.complete(worker(self.data, self.ci, request))
-        self.assertNotIn("d" * 40, self.data["statuses"])
-        self.assertEqual(self.head_status()["state"], "error")
-
-    def test_terminal_result_is_idempotent(self):
-        request = self.accept()
-        run = worker(self.data, self.ci, request)
-        self.complete(run)
-        count = len(self.data["statuses"][HEAD])
-        self.complete(run)
-        self.assertEqual(len(self.data["statuses"][HEAD]), count)
-        self.assertIsNone(self.accept())
-
-    def test_displaced_completion_event_reconciles_current_request(self):
-        old = self.accept()
-        new = self.accept(11)
-        worker(self.data, self.ci, new, 101)
-        self.complete(worker(self.data, self.ci, old, 100, "cancelled"))
-        self.assertEqual(self.head_status()["state"], "success")
-
-    def test_lint_and_packages_have_distinct_statuses_and_locks(self):
-        for number, command in enumerate(("/test", "/lint", "/test-tasks", "/test-environment"), 10):
-            self.accept(number, command)
-        contexts = {s["context"] for s in self.data["statuses"][HEAD]}
-        self.assertEqual(len(contexts), 4)
-        keys = {self.ci.group(REPO, c) for c in ("test", "lint", "test-tasks", "test-environment")}
-        self.assertEqual(len(keys), 4)
-        self.assertNotEqual(
-            self.ci.status_context("test-Foo").lower(),
-            self.ci.status_context("test-foo").lower(),
-        )
-
-    def test_forged_worker_identity_is_ignored_and_base_mismatch_is_an_error(self):
-        request = self.accept()
-        run = worker(self.data, self.ci, request)
-        for key, value in (
-            ("workflow_id", 66), ("path", ".github/workflows/other.yml"),
-            ("head_branch", "attacker"), ("event", "pull_request"),
-        ):
-            original = run[key]
-            run[key] = value
-            self.assertIsNone(self.ci.route_event(
-                self.api, REPO, "workflow_run", {"action": "completed", "workflow_run": run}
-            ))
-            run[key] = original
-        run["head_sha"] = "d" * 40
-        self.complete(run)
-        self.assertEqual(self.head_status()["state"], "error")
-        record, state = self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
-        self.assertEqual(record["worker"], request["worker"])
-        self.assertEqual(state, "error")
+    def test_lint_and_packages_have_distinct_case_sensitive_locks_and_cursors(self):
+        commands = ("lint", "test", "test-tasks", "test-environment", "test-Foo", "test-foo")
+        self.assertEqual(len({self.ci.group(REPO, c) for c in commands}), len(commands))
+        self.assertEqual(len({self.ci.state_context("1", c) for c in commands}), len(commands))
 
     def test_worker_gate_requires_current_record_open_head_and_trusted_base(self):
         request = self.accept()
-        run = worker(self.data, self.ci, request)
         self.assertEqual(
             self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), "100"), request
         )
@@ -586,27 +307,27 @@ class CommentCiTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "head"):
             self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), "100")
         self.data["pr"]["head"]["sha"] = HEAD
+        self.data["pr"]["state"] = "closed"
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), "100")
+        self.data["pr"]["state"] = "open"
         self.accept(11)
         with self.assertRaisesRegex(RuntimeError, "superseded"):
             self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), "100")
-        run["head_sha"] = BASE
 
-    def test_malformed_durable_record_fails_closed(self):
-        self.accept()
-        self.data["statuses"][ANCHOR][0]["description"] = "not a controller record"
-        with self.assertRaisesRegex(RuntimeError, "record"):
-            self.accept(11)
-
-    def test_dispatch_failure_is_not_left_passing_or_pending(self):
-        def failing_api(method, path, body=None):
-            if path.endswith("/dispatches"):
-                raise RuntimeError("API unavailable")
-            return self.api(method, path, body)
-        event = comment(self.data)
-        route = self.ci.route_event(failing_api, REPO, "issue_comment", event)
-        with self.assertRaisesRegex(RuntimeError, "dispatch"):
-            self.ci.accept_comment(failing_api, REPO, ANCHOR, route, "90")
-        self.assertEqual(self.head_status()["state"], "error")
+    def test_worker_gate_rejects_forged_identity_base_and_unsupported_rerun(self):
+        for key, value in (
+            ("workflow_id", 66), ("path", ".github/workflows/other.yml"),
+            ("head_branch", "attacker"), ("event", "pull_request"),
+            ("head_sha", "d" * 40), ("repository", {"full_name": "attacker/service"}),
+            ("run_attempt", 2), ("display_title", "unbound dispatch"),
+        ):
+            with self.subTest(key=key):
+                self.data, self.api = fixture()
+                request = self.accept()
+                self.data["runs"]["100"][key] = value
+                with self.assertRaisesRegex(RuntimeError, "trusted"):
+                    self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), "100")
 
     def test_only_controller_cancels_bound_older_workers_for_same_pr_and_command(self):
         old = self.accept()
@@ -624,129 +345,141 @@ class CommentCiTest(unittest.TestCase):
         old = self.accept()
         self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(old), old["worker"])
         new = self.accept(11)
-        # Simulate delayed execution admission of the already validated older worker.
         with self.assertRaisesRegex(RuntimeError, "superseded"):
             self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(old), old["worker"])
         self.assertEqual(self.data["runs"][new["worker"]]["status"], "queued")
-        self.complete(worker(self.data, self.ci, new))
-        self.assertEqual(self.head_status()["state"], "success")
+        self.assertEqual(
+            self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(new), new["worker"]), new
+        )
 
-    def test_shared_sha_old_pr_cannot_replace_new_pr_pending_or_success(self):
+    def test_unverifiable_obsolete_worker_is_not_cancelled_or_replaced(self):
+        old = self.accept()
+        self.data["runs"][old["worker"]]["display_title"] = "unrelated worker"
+        with self.assertRaisesRegex(RuntimeError, "dispatch"):
+            self.accept(11)
+        self.assertFalse(any(path.endswith("/cancel") for _, path, _ in self.data["calls"]))
+        self.assertEqual(len(self.data["runs"]), 1)
+        request, phase = self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
+        self.assertEqual(request["request"], "11")
+        self.assertIsNone(request["worker"])
+        self.assertEqual(phase, "error")
+
+    def test_shared_sha_prs_execute_independently_without_public_status(self):
         old = self.accept()
         new = self.accept(11, pr=2)
-        self.complete(worker(self.data, self.ci, old))
-        self.assertEqual(self.head_status()["state"], "pending")
-        self.complete(worker(self.data, self.ci, new))
-        self.assertEqual(self.head_status()["state"], "success")
-        self.assertIn("|11|2|", self.head_status()["description"])
+        for request in (old, new):
+            self.assertEqual(
+                self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), request["worker"]),
+                request,
+            )
+            self.assertEqual(self.data["runs"][request["worker"]]["status"], "queued")
+        self.assertFalse(any(path.endswith("/cancel") for _, path, _ in self.data["calls"]))
+        self.assertNotIn(HEAD, self.data["statuses"])
 
-    def test_closed_old_pr_cannot_invalidate_new_pr_result_on_shared_sha(self):
-        old = self.accept()
-        new = self.accept(11, pr=2)
-        self.complete(worker(self.data, self.ci, new))
-        self.data["pr"]["state"] = "closed"
-        self.complete(worker(self.data, self.ci, old))
-        self.assertEqual(self.head_status()["state"], "success")
-
-    def test_delayed_cross_pr_comment_cannot_replace_shared_sha_newer_owner(self):
-        self.accept(11, pr=2)
-        old = self.accept(10)
-        self.assertEqual(self.head_status()["state"], "pending")
-        self.assertIn("|11|2|", self.head_status()["description"])
-        self.complete(worker(self.data, self.ci, old))
-        self.assertEqual(self.head_status()["state"], "pending")
-
-    def test_duplicate_dispatch_never_takes_ownership_after_original_rerun(self):
+    def test_duplicate_dispatch_cannot_replace_bound_owner_even_after_original_rerun(self):
         request = self.accept()
-        original = worker(self.data, self.ci, request, conclusion="failure")
-        original["run_attempt"] = 2
-        duplicate = worker(self.data, self.ci, request, number=101)
+        self.data["runs"]["100"]["run_attempt"] = 2
+        self.data["runs"]["101"] = {**self.data["runs"]["100"], "id": 101, "run_attempt": 1}
         with self.assertRaisesRegex(RuntimeError, "owner"):
             self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), "101")
-        self.complete(duplicate)
-        self.assertEqual(self.head_status()["state"], "error")
-        self.assertTrue(self.head_status()["target_url"].endswith("/100"))
+        with self.assertRaisesRegex(RuntimeError, "trusted"):
+            self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), "100")
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "pending"))
 
-    def test_rerun_after_published_success_invalidates_only_current_owner_once(self):
+    def test_legacy_records_remain_readable_and_pending_owners_are_admitted(self):
+        for version in ("v2", "v3"):
+            for phase in ("pending", "success", "failure", "error"):
+                with self.subTest(version=version, phase=phase):
+                    self.data, self.api = fixture()
+                    request = self.accept()
+                    fields = [version, *(request[k] for k in ("request", "controller", "sha", "base"))]
+                    if version == "v3":
+                        fields.append("-" if phase in ("pending", "success") else "f")
+                    record = self.data["statuses"][ANCHOR][0]
+                    record.update(description="|".join(fields), state=phase)
+                    self.assertEqual(
+                        self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, phase)
+                    )
+                    if phase == "pending":
+                        self.assertEqual(
+                            self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), "100"),
+                            request,
+                        )
+
+    def test_malformed_or_foreign_durable_records_fail_closed(self):
         request = self.accept()
-        run = worker(self.data, self.ci, request)
-        self.complete(run)
-        self.assertEqual(self.head_status()["state"], "success")
-        run["run_attempt"] = 2
-        run["conclusion"] = "failure"
-        self.complete(run)
-        self.assertEqual(self.head_status()["state"], "error")
-        count = len(self.data["statuses"][HEAD])
-        self.complete(run)
-        self.assertEqual(len(self.data["statuses"][HEAD]), count)
+        cursor = self.data["statuses"][ANCHOR][0]
+        original = copy.deepcopy(cursor)
+        for changes in (
+            {"description": "not a controller record"},
+            {"description": original["description"] + "|extra"},
+            {"description": original["description"].rsplit("|", 1)[0] + "|unknown"},
+            {"description": original["description"].rsplit("|", 1)[0] + "|h"},
+            {"description": original["description"].replace("v3|", "v99|", 1)},
+            {"creator": {"login": "other-app[bot]", "type": "Bot"}},
+            {"target_url": "https://other.example/actions/runs/100"},
+        ):
+            with self.subTest(changes=changes):
+                cursor.clear()
+                cursor.update(copy.deepcopy(original), **changes)
+                with self.assertRaisesRegex(RuntimeError, "record"):
+                    self.accept(11)
+        cursor.clear()
+        cursor.update(original)
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")[0], request)
 
-    def test_terminal_old_pr_rerun_cannot_invalidate_newer_shared_sha_success(self):
-        old = self.accept()
-        run = worker(self.data, self.ci, old)
-        self.complete(run)
-        new = self.accept(11, pr=2)
-        self.complete(worker(self.data, self.ci, new))
-        run["run_attempt"] = 2
-        run["conclusion"] = "failure"
-        self.complete(run)
-        self.assertEqual(self.head_status()["state"], "success")
-        self.assertIn("|11|2|", self.head_status()["description"])
+    def test_maximum_identifier_width_still_fits_bookkeeping_description(self):
+        event = comment(self.data, number=10**20 - 1)
+        route = self.ci.route_event(self.api, REPO, "issue_comment", event)
+        request = self.ci.accept_comment(self.api, REPO, ANCHOR, route, str(10**20 - 2))
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")[0], request)
+        for record in self.data["statuses"][ANCHOR]:
+            self.assertLessEqual(len(record["description"]), 140)
 
-    def test_deleted_completed_history_is_not_fetched_and_does_not_block_new_requests(self):
-        old = self.accept()
-        self.complete(worker(self.data, self.ci, old))
-        del self.data["runs"][old["worker"]]
-        self.accept(11)
-        self.accept(12)
-        dispatches = [path for method, path, _ in self.data["calls"]
-                      if method == "POST" and path.endswith("/dispatches")]
-        self.assertEqual(len(dispatches), 3)
-        self.assertEqual(self.head_status()["state"], "pending")
+    def test_completed_or_deleted_historical_workers_do_not_block_new_requests(self):
+        for legacy_terminal in (False, True):
+            with self.subTest(legacy_terminal=legacy_terminal):
+                self.data, self.api = fixture()
+                old = self.accept()
+                if legacy_terminal:
+                    self.ci.write_state(self.api, REPO, ANCHOR, old, "success")
+                self.data["runs"][old["worker"]].update(status="completed", conclusion="success")
+                self.accept(11)
+                del self.data["runs"][old["worker"]]
 
-    def test_missing_unreconciled_obsolete_owner_is_no_longer_cancellable(self):
-        old = self.accept()
+                def missing_api(method, path, body=None):
+                    if method == "GET" and path == f"repos/{REPO}/actions/runs/{old['worker']}":
+                        return None
+                    return self.api(method, path, body)
 
-        def missing_api(method, path, body=None):
-            if method == "GET" and path == f"repos/{REPO}/actions/runs/{old['worker']}":
-                return None
-            return self.api(method, path, body)
+                event = comment(self.data, 12)
+                route = self.ci.route_event(missing_api, REPO, "issue_comment", event)
+                self.assertIsNotNone(self.ci.accept_comment(missing_api, REPO, ANCHOR, route, "90"))
+                self.assertEqual(len(self.data["runs"]), 2)
 
-        for number in (11, 12):
-            event = comment(self.data, number)
-            route = self.ci.route_event(missing_api, REPO, "issue_comment", event)
-            result = self.ci.accept_comment(missing_api, REPO, ANCHOR, route, "90")
-            self.assertIsNotNone(result["worker"])
-        self.assertEqual(self.head_status()["state"], "pending")
+    def test_missing_dispatch_id_or_api_failure_leaves_only_internal_error(self):
+        for missing_id in (False, True):
+            with self.subTest(missing_id=missing_id):
+                self.data, self.api = fixture()
+                event = comment(self.data)
+                route = self.ci.route_event(self.api, REPO, "issue_comment", event)
 
-    def test_exact_missing_run_api_response_is_optional_but_other_errors_fail(self):
-        from unittest.mock import patch
-        from urllib.error import HTTPError
-        with patch.dict("os.environ", {"GH_TOKEN": "private-token"}):
-            with patch.object(self.ci, "urlopen", side_effect=HTTPError(
-                "https://api.github.com", 404, "missing", {}, None
-            )):
-                self.assertIsNone(self.ci.github_api("GET", f"repos/{REPO}/actions/runs/100"))
-                with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
-                    self.ci.github_api("GET", f"repos/{REPO}/actions/runs/100/attempts/1/jobs")
+                def failed_dispatch(method, path, body=None):
+                    if path.endswith("/dispatches"):
+                        if missing_id:
+                            self.api(method, path, body)
+                            return None
+                        raise RuntimeError("GitHub API request failed.")
+                    return self.api(method, path, body)
 
-    def test_missing_dispatch_run_id_fails_closed_without_inferred_ownership(self):
-        def legacy_api(method, path, body=None):
-            result = self.api(method, path, body)
-            return None if path.endswith("/dispatches") else result
-        event = comment(self.data)
-        route = self.ci.route_event(legacy_api, REPO, "issue_comment", event)
-        with self.assertRaisesRegex(RuntimeError, "dispatch"):
-            self.ci.accept_comment(legacy_api, REPO, ANCHOR, route, "90")
-        self.assertEqual(self.head_status()["state"], "error")
-
-    def test_foreign_reserved_state_fails_closed(self):
-        self.accept()
-        self.data["statuses"][ANCHOR][0]["creator"] = {"login": "other-app[bot]", "type": "Bot"}
-        with self.assertRaisesRegex(RuntimeError, "record"):
-            self.accept(11)
+                with self.assertRaisesRegex(RuntimeError, "dispatch"):
+                    self.ci.accept_comment(failed_dispatch, REPO, ANCHOR, route, "90")
+                request, phase = self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
+                self.assertEqual(phase, "error")
+                self.assertIsNone(request["worker"])
+                self.assertNotIn(HEAD, self.data["statuses"])
 
     def test_registration_visibility_retry_never_promotes_a_duplicate(self):
-        from unittest.mock import patch
         request = self.accept()
         pending = self.data["statuses"][ANCHOR][0]
         saved_url = pending["target_url"]
@@ -762,52 +495,67 @@ class CommentCiTest(unittest.TestCase):
             )
         sleep.assert_called_once()
 
-    def test_network_errors_do_not_echo_response_or_credentials(self):
-        from unittest.mock import patch
+    def test_graphql_uses_platform_endpoint_and_does_not_log_api_errors(self):
         from urllib.error import HTTPError
-        error = HTTPError("https://api.github.com", 403, "secret response", {}, None)
+        with patch.dict("os.environ", {
+            "GH_TOKEN": "private-token", "GITHUB_GRAPHQL_URL": "https://github.example/api/graphql",
+        }):
+            with patch.object(self.ci, "urlopen", side_effect=HTTPError(
+                "https://github.example", 403, "private response", {}, None
+            )) as opened:
+                with self.assertRaisesRegex(RuntimeError, "HTTP 403") as raised:
+                    self.ci.github_api("POST", "graphql", {"query": "query { viewer { login } }"})
+        self.assertEqual(opened.call_args.args[0].full_url, "https://github.example/api/graphql")
+        self.assertEqual(opened.call_args.kwargs["timeout"], 30)
+        self.assertNotIn("private", str(raised.exception))
+
+    def test_exact_missing_run_api_response_is_optional_but_other_errors_fail(self):
+        from urllib.error import HTTPError
         with patch.dict("os.environ", {"GH_TOKEN": "private-token"}):
-            with patch.object(self.ci, "urlopen", side_effect=error):
-                with self.assertRaisesRegex(RuntimeError, "GitHub API request failed") as raised:
-                    self.ci.github_api("GET", f"repos/{REPO}")
-        self.assertNotIn("secret", str(raised.exception))
-        self.assertNotIn("private-token", str(raised.exception))
+            with patch.object(self.ci, "urlopen", side_effect=HTTPError(
+                "https://api.github.com", 404, "missing", {}, None
+            )):
+                self.assertIsNone(self.ci.github_api("GET", f"repos/{REPO}/actions/runs/100"))
+                with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
+                    self.ci.github_api("GET", f"repos/{REPO}/actions/runs/100/attempts/1/jobs")
 
     def test_execution_calls_only_the_approved_make_targets(self):
-        import json
-        from unittest.mock import patch
-
-        def captured(_args, mode):
-            return dict(mode=mode, status="passed", passed=None, failed=None, ignored=None,
-                        failing_tests=[], exit_code=0)
-
-        with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
+        with patch.object(self.ci.subprocess, "run") as run:
             self.ci.execute("lint")
-            run.assert_called_once_with(["make", "lint"], "lint")
-        with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
+            run.assert_called_once_with(["make", "lint"], check=True)
+        with patch.object(self.ci.subprocess, "run") as run:
             self.ci.execute("test")
-            self.assertEqual(
-                [call.args[0] for call in run.call_args_list],
-                [["make", "test", "FEATURES="], ["make", "test", "FEATURES=api-doc"]],
-            )
+            self.assertEqual([call.args[0] for call in run.call_args_list], [
+                ["make", "test", "FEATURES="], ["make", "test", "FEATURES=api-doc"],
+            ])
+            self.assertTrue(all(call.kwargs == {"check": True} for call in run.call_args_list))
         metadata = {
             "workspace_members": ["pkg"],
             "packages": [{"id": "pkg", "name": "tasks", "features": {"api-doc": []}}],
         }
         with patch.object(self.ci.subprocess, "check_output", return_value=json.dumps(metadata)):
-            with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
+            with patch.object(self.ci.subprocess, "run") as run:
                 self.ci.execute("test-tasks")
-                self.assertEqual(
-                    [call.args[0] for call in run.call_args_list],
-                    [["make", "test-crate", "CRATE=tasks", "FEATURES="],
-                     ["make", "test-crate", "CRATE=tasks", "FEATURES=tasks/api-doc"]],
-                )
+                self.assertEqual([call.args[0] for call in run.call_args_list], [
+                    ["make", "test-crate", "CRATE=tasks", "FEATURES="],
+                    ["make", "test-crate", "CRATE=tasks", "FEATURES=tasks/api-doc"],
+                ])
             metadata["packages"][0]["features"] = {}
         with patch.object(self.ci.subprocess, "check_output", return_value=json.dumps(metadata)):
-            with patch.object(self.ci.report, "capture_make", side_effect=captured) as run:
+            with patch.object(self.ci.subprocess, "run") as run:
                 self.ci.execute("test-tasks")
                 run.assert_called_once_with(
-                    ["make", "test-crate", "CRATE=tasks", "FEATURES="], "default"
+                    ["make", "test-crate", "CRATE=tasks", "FEATURES="], check=True
                 )
+                run.reset_mock()
                 with self.assertRaisesRegex(RuntimeError, "Unknown workspace"):
                     self.ci.execute("test-other")
+                run.assert_not_called()
+
+    def test_failed_make_stops_execution_and_propagates_failure(self):
+        with patch.object(self.ci.subprocess, "run", side_effect=subprocess.CalledProcessError(
+            2, ["make", "test", "FEATURES="]
+        )) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.ci.execute("test")
+        run.assert_called_once_with(["make", "test", "FEATURES="], check=True)

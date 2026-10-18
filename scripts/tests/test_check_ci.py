@@ -56,7 +56,7 @@ class CheckCiTests(unittest.TestCase):
         self.assertEqual(self.run_check(errors=[
             self.diagnostic(),
             self.diagnostic(filepath=".github/workflows/ci-command-completion.yml"),
-        ]), 0)
+        ]), 1)
         self.assertEqual(self.run_check(code=0), 0)
 
     def test_other_diagnostics_and_duplicate_exceptions_fail(self):
@@ -70,6 +70,7 @@ class CheckCiTests(unittest.TestCase):
 
     def test_wrong_diagnostic_location_or_kind_fails(self):
         for changes in (dict(filepath=".github/workflows/other.yml"), dict(line=7),
+                        dict(filepath=".github/workflows/ci-command-completion.yml"),
                         dict(column=8), dict(kind="other")):
             with self.subTest(changes=changes):
                 self.assertEqual(self.run_check(errors=[self.diagnostic(**changes)]), 1)

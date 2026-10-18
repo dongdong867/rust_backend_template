@@ -67,8 +67,6 @@ class TemplateChecksTest(unittest.TestCase):
         for path in (
             ".github/workflows/format.yml", ".github/dependabot.yml",
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
-            ".github/workflows/ci-command-completion.yml", ".github/ci/command_report.py",
-            ".github/ci/github_log.py",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
         ):
             self.write(self.output, path, (template_test.ROOT / path).read_text())

@@ -19,8 +19,6 @@ WORKFLOW_TEXT = "name: expression probe\nrun-name: ${{ github.sha }}\n"
 SHARED_CI_FILES = (
     ".github/workflows/format.yml", ".github/dependabot.yml",
     ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
-    ".github/workflows/ci-command-completion.yml", ".github/ci/command_report.py",
-    ".github/ci/github_log.py",
     ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
 )
 
