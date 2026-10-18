@@ -1,4 +1,4 @@
-"""Validate original workflows with a single actionlint 1.7.12 exception."""
+"""Validate original workflows with one narrow actionlint 1.7.12 exception."""
 
 import json
 from pathlib import Path

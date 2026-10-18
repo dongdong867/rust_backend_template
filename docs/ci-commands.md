@@ -1,91 +1,89 @@
 # Maintainer command security and validation
 
 The only command forms are `/lint`, `/test` and `/test-{crate}`.
-See [the README](../README.md#maintainer-requested-checks) for their behavior and [Make](../Makefile) for local checks.
+See [the README](../README.md#maintainer-requested-checks) for command selection and [Make](../Makefile) for local checks.
+Results and ordinary logs are inspected in GitHub Actions, not in a bot comment or custom PR-result status.
 
-## Trust boundaries
+## Acceptance and trust boundaries
 
-`ci-command.yml` handles newly created issue comments and completed runs of `ci-command-worker.yml`.
+`ci-command.yml` handles newly created issue comments.
 Its read-only route job checks exact syntax, an open PR and the commenter's current repository write, maintain or admin permission.
-Rejected commands never enter the controller or dispatch a worker.
-The controller rechecks the comment and permission before accepting it.
-An accepted request contains a PR number, command, comment ID, accepting controller run ID, exact PR head SHA and trusted worker workflow SHA.
-The controller uses REST API version `2026-03-10` and binds ownership to the worker ID returned by dispatch; a legacy response without an ID fails closed.
+Rejected comments never enter the acceptance lock or dispatch a worker.
+The controller rechecks comment identity, body, PR association, permission and edit state before accepting it.
 
-The controller alone has `actions: write` for dispatch/cancellation and `statuses: write` for reporting.
-It checks out only `github.sha`, which is a trusted default-branch commit for both trigger types.
-It never evaluates PR source, Makefiles, toolchain files, caches or artifacts.
-Workers have only read permissions and non-persisted checkout credentials.
+A `created` event can contain an already-edited body.
+Routing and acceptance therefore query the comment's explicit GraphQL `lastEditedAt`, bound to the same node ID, database ID and body.
+Only an explicit null edit time is accepted; missing, malformed, mismatched or unavailable metadata cannot authorize execution.
+Comparing REST `created_at` and `updated_at` is insufficient because edits can happen within the same second.
+The query uses variables rather than embedding comment-controlled values, and API diagnostics never include raw response bodies.
+The GitHub-provided `GITHUB_GRAPHQL_URL` selects the GraphQL endpoint, including on Enterprise installations.
+Edits after acceptance are not new requests and do not retarget the captured run.
+
+An accepted request contains a PR number, command, comment ID, accepting controller run ID, exact PR head SHA and trusted worker workflow SHA.
+The controller uses REST API version `2026-03-10` and binds ownership to the worker ID returned by dispatch.
+A legacy dispatch response without an ID fails closed; ownership is never inferred by listing matching runs.
+Only the controller has `actions: write` for dispatch and cancellation.
+Its `statuses: write` permission maintains internal ownership records on the root commit, not results on PR heads.
+It checks out trusted `github.sha` and never evaluates PR source, Makefiles, toolchain files, caches or artifacts.
+
+Workers have read-only permissions and non-persisted checkout credentials.
 No production secret, writable token, privileged environment, self-hosted runner or shared writable cache is used for PR execution.
 Do not enable private-fork settings that send write tokens or secrets to PR workflows.
-An authorized comment is explicit permission to execute the captured code; default fork-workflow approval settings do not replace this authorization.
+An authorized command explicitly approves execution of the captured code; fork-workflow approval settings do not replace this authorization.
 
-Workers validate their bound ID and durable accepted request before execution admission and again before checking out code.
-Admission never automatically cancels another worker.
-Only the controller cancels recorded obsolete worker IDs for the same PR and command; a delayed older job cannot cancel the newer owner.
-A worker briefly retries when startup precedes registration visibility, but never infers ownership from matching metadata.
-They fetch the captured PR SHA through the base repository, verify the checkout SHA and execute the requested Make targets.
-All PR evaluation, including tool-pin discovery, happens only after the read-only boundary.
-Each worker's definition and validation code come from the default branch, not its PR.
-Passing results require the bound worker ID, expected workflow ID/path, repository, default branch, initial run attempt, request metadata and recorded workflow SHA.
-The bound owner's unsupported rerun or dispatch-ref mismatch is an explicit status error, not an indefinitely missing result.
-An unsupported rerun invalidates that owner's earlier passing result, but cannot change a newer request's shared-SHA status.
-Success also requires both the validation and execution jobs to have succeeded; a skipped execution job cannot count as passing tests.
-The reporter never downloads or trusts worker-produced artifacts.
-Manual worker dispatches and Actions reruns are not the supported request interface; create a new command comment.
+Workers validate their bound ID and durable request before execution admission and again before checking out PR code.
+They fetch the captured SHA through the base repository, verify the checkout SHA and run only the requested Make targets.
+Tool-pin discovery and all other PR evaluation happen only after the read-only boundary.
+The workflow definition and validation code come from the trusted default branch.
+Unsupported reruns, duplicate dispatches, superseded requests, changed heads and mismatched workflow identities cannot execute as the accepted worker.
+Create a new command comment instead of manually dispatching or rerunning jobs.
 
-## Why cancellation alone is insufficient
+## Ownership and cancellation
 
 GitHub concurrency does not guarantee dispatch ordering.
-Reading the latest comment and then writing a status from independent reporters leaves a race.
-The same non-cancelling repository/command controller lock therefore owns acceptance, cancellation, pending statuses and final statuses across PRs.
-Workers have no cancelling concurrency group, so they cannot cancel another worker or the status writer.
-The controller uses `queue: max`, which preserves up to 100 pending controller jobs, rather than the default replacement of a single pending job.
-Overflowed, manually cancelled or failed controller runs need a new comment; they must not be treated as successful checks.
+Acceptance, bookkeeping and cancellation retain one non-cancelling repository/command controller lock.
+Workers have no cancelling concurrency group, so a delayed older worker cannot cancel a newer request.
+Only the controller cancels specifically recorded obsolete worker IDs for the same PR and command.
+Different commands, packages and PRs execute independently, including PRs sharing a head SHA.
+The command hash preserves exact, case-sensitive package selectors.
 
-Commit statuses are shared when two PRs have the same head SHA.
-The newest accepted comment ID for a SHA/command owns its visible status; older PR completions cannot overwrite that pending or terminal result.
-Per-PR cursors and worker cancellation remain independent even when the commit status is shared.
-Package contexts include a command hash because GitHub context names are case-insensitive while Cargo package names are exact selectors.
+The controller uses `queue: max`, preserving up to 100 pending jobs instead of replacing a single pending job.
+Overflowed, manually cancelled or failed controller runs need a new command; they do not prove checks passed.
+Commit statuses on the repository's single root commit hold `ci-command-state/<PR>/<command-hash>` cursors.
+These are internal bookkeeping, not required checks or test results.
+The comment ID orders accepted requests across head and default-branch updates.
+Older controller events cannot replace a newer cursor.
+Existing v2 and v3 records remain readable; v3 reason codes remain validated for compatibility.
+An internal `pending` record means the latest request was accepted/registered, not that its worker is still running.
+Worker completion does not finalize these cursors; run attempts and bound IDs still prevent unsupported re-execution.
+Completed historical workers need no cancellation, and deleted obsolete runs do not block fresh requests.
+Only Actions-authored records are accepted; corrupt or foreign records fail closed.
+Repositories with multiple root commits are refused; do not rewrite history while runs are active.
+GitHub's status-count limits still apply; bookkeeping API failures require inspection, not a success fallback.
 
-GitHub commit statuses on the repository's single root commit hold durable `ci-command-state/<PR>/<command-hash>` cursors.
-A full-history trusted checkout identifies this stable anchor, so changing either the PR head or the default branch cannot reset request ordering.
-These are internal bookkeeping contexts, not required checks.
-The comment ID orders accepted requests. Older events cannot replace a newer cursor.
-Every completion reconciles the currently accepted request from GitHub run metadata, even when the event belongs to an older worker.
-Terminal results are idempotent, and a new request first replaces its head-SHA result with pending.
-Cancellation skips already completed historical owners and tolerates deleted obsolete runs; archived history cannot permanently block a fresh command.
-Only Actions-authored cursor and result records are accepted; corrupt or foreign state fails closed rather than silently resetting ownership.
-Repositories with multiple root commits are refused; do not rewrite repository history while command runs are active.
-GitHub's status-count limits still apply; API failures are nonpassing and require inspection, not a success fallback.
+## Actions-only results and rollout
+
+Inspect **CI command worker** runs in Actions using the command and captured SHA in each run title.
+The **Validate accepted request** and **Run PR command** jobs show actual results and ordinary logs.
+Make failures stop further feature modes and propagate a nonzero result; unknown packages never fall back to workspace tests.
+Cancellation and timeout remain nonpassing native Actions conclusions.
+No completion workflow, bot result comment, log-summary download, test-count report or coverage comparison is part of this flow.
+New requests publish no custom `ci-comment` result contexts.
+Historical contexts may remain pending and are deliberately not rewritten or treated as passing results.
+Do not configure them, controller jobs, worker jobs or internal cursor contexts as a full-test required-check gate.
+Repository protection settings are not changed.
+
+The controller, worker and execution helpers must reach the default branch before hosted QA can exercise this version.
+Both generated variants retain the same execution support.
+Hosted validation must cover exact syntax and authorization; edited comments before routing/acceptance; successful and failed lint/full/package execution; unknown packages; exact captured heads; cancellation; independent PRs/commands; duplicate/rerun rejection; and fork-head access.
+Private-fork support needs its own environment and permission checks.
+Local port tests and generation checks do not prove hosted token permissions, event delivery, scheduling or fork access.
+Unperformed actor, fork or error checks remain unverified.
 
 ## Workflow checker compatibility
 
-Pinned actionlint `1.7.12` does not yet recognize GitHub's documented `queue: max` field.
-`make ci-config-check` runs that checker on the original workflow files and validates the one canonical non-cancelling controller mapping separately.
-Only its exact unsupported-key diagnostic at that validated location is exempted; wrong values, alternate placement, duplicate keys and all other diagnostics still fail.
-No YAML is stripped or rewritten before checking.
-Remove the compatibility exception when a released checker natively supports the field.
-
-## Required check rollout
-
-Both workflows must first reach the default branch.
-Review the privilege boundaries, state/status writer serialization, request matching and workflow pins before making a check required.
-Keep `ci-comment /test` non-required until the following hosted evidence is collected on the exact installed workflow version:
-
-1. An unauthorized exact command, a normal issue comment, an edited comment and extra whitespace do not dispatch work or write statuses.
-2. An authorized `/lint` and `/test` produce separate statuses on the captured PR head; deliberately failing lint and tests report failure.
-3. `/test-{crate}` selects a workspace member only, runs its supported feature modes and uses a partial context distinct from `ci-comment /test`. An unknown package fails clearly.
-4. Two identical commands cancel/supersede the older execution. Its late cancellation or completion cannot overwrite the newer pending or terminal result.
-5. Different commands, different packages and different PRs run independently.
-6. A head update leaves the new commit without a passing full-test status until a fresh `/test` succeeds. A stale worker never reports success on that new SHA.
-7. The base repository can fetch the exact head and attach statuses for a fork PR. Repeat on a private fork when private-fork support is needed.
-8. Cancellation, timeout, skipped jobs and unavailable API calls cannot yield success. Observe cold-run elapsed and billed time; no cache or runtime guarantee is assumed.
-9. Generated repositories with and without the example retain the byte-identical workflows/helpers and the package test target, with their generated service name.
-10. Two PRs sharing a head SHA execute independently, but only the newest accepted request can change that SHA/command's visible result. A closed older PR cannot overwrite it.
-11. The dispatch response's worker ID owns the request; duplicate dispatches and reruns cannot take over. A changed dispatch base becomes a nonpassing result.
-
-Then, with separate repository-settings approval, require only `ci-comment /test` on the integration branch.
-Select GitHub Actions as its expected source where GitHub offers that setting.
-Do not use the controller's default-branch job checks, worker job checks, lint results, package results or state contexts as a full-test substitute.
-No part of local verification proves hosted event delivery, private-fork access, Actions scheduling or repository protection configuration.
+Pinned actionlint `1.7.12` does not recognize GitHub's documented `queue: max`.
+`make ci-config-check` checks original workflows and validates the controller's one canonical non-cancelling control mapping.
+Only the exact unsupported-key diagnostic at that validated location is exempted.
+Other workflows, duplicate keys, wrong values, alternate placements and unrelated diagnostics still fail.
+Remove the compatibility exception when a released checker supports the field.

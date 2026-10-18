@@ -70,7 +70,8 @@ class CiPolicyTest(unittest.TestCase):
     def test_command_controller_never_checks_out_or_executes_pr_code(self):
         text = self.workflow("ci-command.yml")
         self.assertIn("issue_comment:\n    types: [created]", text)
-        self.assertIn("workflow_run:\n    workflows: [CI command worker]\n    types: [completed]", text)
+        self.assertNotIn("workflow_run:", text)
+        self.assertNotIn("pull-requests: write", text)
         self.assertIn("cancel-in-progress: false", text)
         self.assertIn("queue: max", text)
         self.assertIn("if: needs.route.outputs.enabled == 'true'", text)
@@ -82,6 +83,20 @@ class CiPolicyTest(unittest.TestCase):
         self.assertNotIn("download-artifact", text)
         self.assertNotIn("persist-credentials: true", text)
         self.assertIn("ci-command-control-", text)
+
+    def test_actions_only_controller_keeps_its_trusted_acceptance_lock(self):
+        workflow = self.workflow("ci-command.yml")
+        self.assertEqual(workflow.count(
+            "    concurrency:\n"
+            "      group: ci-command-control-${{ needs.route.outputs.group }}\n"
+            "      cancel-in-progress: false\n"
+            "      queue: max\n"), 1)
+        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 2)
+        self.assertIn("comment_ci.py route", workflow)
+        self.assertIn("comment_ci.py control", workflow)
+        for forbidden in ("secrets.", "download-artifact", "inputs.sha", "make ",
+                          "workflow_run:", "pull-requests: write"):
+            self.assertNotIn(forbidden, workflow)
 
     def test_command_worker_has_non_cancelling_admission_and_no_write_permissions(self):
         text = self.workflow("ci-command-worker.yml")
@@ -99,6 +114,7 @@ class CiPolicyTest(unittest.TestCase):
         self.assertIn("ref: ${{ inputs.sha }}", text)
         self.assertIn("persist-credentials: false", text)
         self.assertIn("worker-check", text)
+        self.assertEqual(text.count("comment_ci.py worker-check"), 2)
         self.assertIn("comment_ci.py execute", text)
         # Expressions belong in step environment, not shell text.
         self.assertNotRegex(text, r"run:.*\$\{\{")
@@ -129,6 +145,14 @@ class CiPolicyTest(unittest.TestCase):
             self.assertIn("For public repositories,", text)
             self.assertIn("For private repositories", text)
             self.assertIn("without write permission", text)
+
+    def test_actions_only_guidance_does_not_promise_reports_or_required_statuses(self):
+        for name in ("README.md", "README.md.liquid"):
+            text = (ROOT / name).read_text()
+            self.assertIn("Results are available in GitHub Actions", text)
+            self.assertNotIn("Completed runs receive one updated bot result comment", text)
+            self.assertNotIn("require only **`ci-comment /test`**", text)
+            self.assertIn("Historical `ci-comment` statuses", text)
 
     def test_tool_versions_come_from_make(self):
         result = subprocess.check_output(
@@ -177,6 +201,11 @@ class GeneratedCiTest(unittest.TestCase):
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
         ):
             self.assertTrue((ROOT / name).is_file(), f"Missing shared command support: {name}")
+        for name in (
+            ".github/workflows/ci-command-completion.yml", ".github/ci/command_report.py",
+            ".github/ci/github_log.py",
+        ):
+            self.assertFalse((ROOT / name).exists(), f"Deferred reporting support remains: {name}")
 
     def test_missing_or_changed_config_is_rejected(self):
         for name in self.files:

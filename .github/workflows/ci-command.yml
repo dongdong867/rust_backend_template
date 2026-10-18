@@ -3,18 +3,14 @@ name: CI command controller
 on:
   issue_comment:
     types: [created]
-  workflow_run:
-    workflows: [CI command worker]
-    types: [completed]
 
 permissions: {}
 
 jobs:
   route:
     if: >-
-      github.event_name == 'workflow_run' ||
-      (github.event.issue.pull_request &&
-       (github.event.comment.body == '/lint' || startsWith(github.event.comment.body, '/test')))
+      github.event.issue.pull_request &&
+      (github.event.comment.body == '/lint' || startsWith(github.event.comment.body, '/test'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -46,7 +42,7 @@ jobs:
       actions: write
       pull-requests: read
       statuses: write
-    # Acceptance and ALL status writes share one repository/command lock, even across PRs.
+    # Internal request bookkeeping and cancellation share one repository/command lock.
     # Only this controller cancels bound obsolete workers; worker admission never cancels a run.
     concurrency:
       group: ci-command-control-${{ needs.route.outputs.group }}
@@ -58,7 +54,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Accept or reconcile the latest request
+      - name: Accept and bind the latest request
         env:
           GH_TOKEN: ${{ github.token }}
           CONTROL_ROUTE: ${{ needs.route.outputs.route }}

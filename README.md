@@ -158,11 +158,11 @@ Elapsed time and billed minutes differ; there are no runtime guarantees.
 
 On an open pull request, create a comment containing exactly one command:
 
-| Command | Work | Result |
-|---|---|---|
-| `/lint` | `make lint` | Lint status |
-| `/test` | `make test` with default features and `api-doc` | Full-test status: `ci-comment /test` |
-| `/test-{crate}` | One workspace package's default tests and `api-doc` when it declares that feature | Separate partial-test status |
+| Command | Work |
+|---|---|
+| `/lint` | `make lint` |
+| `/test` | `make test` with default features and `api-doc` |
+| `/test-{crate}` | One workspace package's default tests and `api-doc` when it declares that feature |
 
 For example, `/test-environment` tests the configuration package; `/test-rust-backend-template` tests the service package.
 Use Cargo package names, not Rust import names, directories, arguments or wildcards.
@@ -170,20 +170,24 @@ These checks are database-free; partial runs compile dependencies but do not run
 There are no additional comment commands.
 
 The commenter needs repository write, maintain or admin permission; association labels alone are not authorization.
-Comments on issues, edits, extra whitespace and unauthorized commands do not dispatch workers or write statuses.
-Each accepted command captures the current head SHA. A new commit needs a new `/test`; an earlier SHA's result cannot satisfy it.
+Comments on issues, edits, extra whitespace and unauthorized commands do not dispatch workers.
+Routing and acceptance both require GitHub's explicit unedited-comment metadata; timestamp equality alone cannot detect same-second edits.
+Each accepted command captures the current head SHA. A changed head needs a fresh command; an earlier run checks only its captured commit.
 Another identical command supersedes its earlier run, while different commands, packages and PRs execute independently.
-When PRs share a head SHA, their commit status is shared: only the newest accepted request for that SHA and command can update it.
 Repeat checks with a new comment, not **Re-run jobs** or manual worker dispatch.
-Cancellation and timeout are nonpassing status errors.
 
-Both command workflows and `.github/ci/` helpers are retained in generated services.
+Results are available in GitHub Actions: open **CI command worker** and select the run whose title identifies the PR, command and captured SHA.
+Inspect **Validate accepted request** and **Run PR command** for the result and ordinary logs; failures, cancellation and timeouts are nonpassing.
+The original comment stays plain text. No bot result comment, test-count report, coverage comparison or custom PR-result status is published.
+Historical `ci-comment` statuses may remain pending; they are not completion evidence or supported required checks.
+Do not require controller jobs, worker jobs or `ci-command-state/` bookkeeping contexts as a full-test merge gate.
+
+The dispatcher, read-only worker and execution helpers are retained in generated services.
 They become active only after reaching the default branch; posting a command cannot test a new workflow definition that exists only on a PR.
 An authorized command explicitly approves execution of that PR head, including fork and draft code, on a read-only hosted worker with no production secrets.
-The controller and reporter use trusted default-branch code and never execute the PR or its artifacts.
-Read [the security and hosted-validation procedure](docs/ci-commands.md) before enabling required checks.
-After security review and hosted validation, require only **`ci-comment /test`**, preferably with GitHub Actions as the expected source.
-Do not require lint, partial-test, controller job, worker job or `ci-command-state/` contexts as substitutes.
+The controller uses trusted default-branch code and never executes the PR or its artifacts.
+Its status-writing permission is used only for internal request ownership, not PR results; no command job has PR-comment write permission.
+See [the security and hosted-validation procedure](docs/ci-commands.md) for the execution and bookkeeping boundaries.
 This change does not enable branch protection or modify repository settings.
 
 ## Changing the service
