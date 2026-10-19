@@ -70,14 +70,15 @@ It is the only worker job with `statuses: write`, checks out only trusted `githu
 It never checks out the PR, runs Make or reads PR-produced outputs, artifacts or caches.
 
 The report job waits for the controller's request lock.
-The validate job names that lock in its first step; a report job without the matching lock name writes nothing and fails.
+The validate job names that lock before it validates; a report job without the matching lock name writes nothing and fails.
 A report writes only for a worker bound in the ledger, on its first attempt.
 Duplicate, unbound and re-run workers write nothing.
 The bound owner of the latest pending request writes its head status, then finalizes the internal cursor with the same outcome.
 If the cursor write fails, the request stays pending; post a new command.
 A superseded worker leaves the cursor unchanged.
 It writes its outcome only to its own captured head, and only while that head's status is still pending and links to its run.
-An older run therefore cannot replace a newer result, and a cancelled older head does not stay pending.
+An older run therefore cannot replace a newer result, and a cancelled older head normally does not stay pending.
+A run cancelled before its validate job names the lock, or whose report fails, can leave its old head pending; post a new command for that head.
 
 Execution success reports `success` and execution failure reports `failure`.
 An execute job that ran for its full 30-minute limit, or that Actions marks `timed_out`, reports `error` with "Timed out".

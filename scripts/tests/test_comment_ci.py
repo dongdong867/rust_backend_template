@@ -130,13 +130,14 @@ class CommentCiTest(unittest.TestCase):
             self.ci.group(REPO, request["command"]) if lock is None else lock,
         )
 
-    def execute_job(self, request, conclusion, minutes):
+    def execute_job(self, request, conclusion, minutes, seconds=5):
+        end = 60 + minutes * 60 + seconds
         self.data["jobs"][request["worker"]] = [
             {"name": "Validate accepted request", "conclusion": "success",
              "started_at": "2026-10-20T00:00:00Z", "completed_at": "2026-10-20T00:00:10Z"},
             {"name": "Run PR command", "conclusion": conclusion,
              "started_at": "2026-10-20T00:01:00Z",
-             "completed_at": f"2026-10-20T00:{1 + minutes:02d}:05Z"},
+             "completed_at": f"2026-10-20T00:{end // 60:02d}:{end % 60:02d}Z"},
         ]
 
     def test_only_three_exact_command_forms(self):
@@ -618,18 +619,50 @@ class CommentCiTest(unittest.TestCase):
         self.assertEqual(self.head_status()["state"], "pending")
 
     def test_execute_timeout_is_reported_as_timed_out(self):
-        for conclusion, minutes, expected in (
-            ("cancelled", 30, "Timed out"), ("timed_out", 30, "Timed out"),
-            ("cancelled", 3, "Cancelled"),
+        timed_out = ("error", "Timed out; post a new command.", "Timed out")
+        cancelled = ("error", "Cancelled; post a new command.", "Cancelled")
+        failed = ("failure", "Requested check failed; see the worker run.", "Worker failed")
+        for execute, conclusion, minutes, seconds, expected in (
+            ("cancelled", "cancelled", 30, 5, timed_out),
+            ("cancelled", "timed_out", 30, 5, timed_out),
+            # The limit is inclusive: a full 30 minutes is a timeout, a second less is not.
+            ("cancelled", "cancelled", 30, 0, timed_out),
+            ("cancelled", "cancelled", 29, 59, cancelled),
+            ("cancelled", "cancelled", 3, 5, cancelled),
+            # Actions may also report a timed-out job as failed.
+            ("failure", "failure", 30, 5, timed_out),
+            ("failure", "timed_out", 30, 5, timed_out),
+            ("failure", "failure", 3, 5, failed),
         ):
-            with self.subTest(conclusion=conclusion, minutes=minutes):
+            with self.subTest(execute=execute, conclusion=conclusion, minutes=minutes, seconds=seconds):
                 self.data, self.api = fixture()
                 request = self.accept()
-                self.execute_job(request, conclusion, minutes)
-                self.assertEqual(self.report(request, "success", "cancelled"), "error")
-                self.assertEqual(self.head_status()["description"], f"{expected}; post a new command.")
-                _, _, reason = next(self.ci.state_records(self.api, REPO, ANCHOR, "1", "test"))
-                self.assertEqual(reason, expected)
+                self.execute_job(request, conclusion, minutes, seconds)
+                state, description, reason = expected
+                self.assertEqual(self.report(request, "success", execute), state)
+                self.assertEqual(self.head_status()["description"], description)
+                _, _, recorded = next(self.ci.state_records(self.api, REPO, ANCHOR, "1", "test"))
+                self.assertEqual(recorded, reason)
+
+    def test_failed_jobs_lookup_keeps_the_plain_outcome(self):
+        for execute, state, description in (
+            ("cancelled", "error", "Cancelled; post a new command."),
+            ("failure", "failure", "Requested check failed; see the worker run."),
+        ):
+            with self.subTest(execute=execute):
+                self.data, self.api = fixture()
+                request = self.accept()
+
+                def jobs_unavailable(method, path, body=None):
+                    if "/jobs?" in path:
+                        raise RuntimeError("GitHub API request failed.")
+                    return self.api(method, path, body)
+
+                self.assertEqual(self.report(request, "success", execute, api=jobs_unavailable), state)
+                self.assertEqual(self.head_status()["description"], description)
+                self.assertEqual(
+                    self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")[1], state
+                )
 
     def test_missing_execute_job_details_keep_the_cancelled_result(self):
         request = self.accept()
