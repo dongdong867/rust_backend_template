@@ -69,12 +69,19 @@ The worker's **Report command result** job runs after validation and execution, 
 It is the only worker job with `statuses: write`, checks out only trusted `github.sha` and reads only the job results GitHub records.
 It never checks out the PR, runs Make or reads PR-produced outputs, artifacts or caches.
 
-The report job waits for the controller's request lock and writes only when its run is the bound owner of the latest pending request on its first attempt.
-Superseded, duplicate, unbound and re-run workers write nothing, so an older run cannot replace a newer result.
-Execution success reports `success` and execution failure reports `failure`.
-Cancellation, failed validation, a changed head or an unknown job result reports `error`.
-It writes the head status first, then finalizes the internal cursor with the same outcome.
+The report job waits for the controller's request lock.
+The validate job names that lock in its first step; a report job without the matching lock name writes nothing and fails.
+A report writes only for a worker bound in the ledger, on its first attempt.
+Duplicate, unbound and re-run workers write nothing.
+The bound owner of the latest pending request writes its head status, then finalizes the internal cursor with the same outcome.
 If the cursor write fails, the request stays pending; post a new command.
+A superseded worker leaves the cursor unchanged.
+It writes its outcome only to its own captured head, and only while that head's status is still pending and links to its run.
+An older run therefore cannot replace a newer result, and a cancelled older head does not stay pending.
+
+Execution success reports `success` and execution failure reports `failure`.
+An execute job that ran for its full 30-minute limit, or that Actions marks `timed_out`, reports `error` with "Timed out".
+Cancellation, failed validation, a changed head or an unknown job result reports `error`.
 Make failures stop further feature modes and propagate a nonzero result; unknown packages never fall back to workspace tests.
 
 Statuses belong to a commit, so a new head starts without a result.
@@ -87,7 +94,7 @@ Making `ci-command /test` required is a separate repository setting, decided aft
 
 The controller, worker and execution helpers must reach the default branch before hosted QA can exercise this version.
 Both generated variants retain the same execution support.
-Hosted validation must cover exact syntax and authorization; edited comments before routing/acceptance; successful and failed lint/full/package execution and their head statuses; unknown packages; exact captured heads; cancellation and its error status; independent PRs/commands; duplicate/rerun rejection; and fork-head access.
+Hosted validation must cover exact syntax and authorization; edited comments before routing/acceptance; successful and failed lint/full/package execution and their head statuses; unknown packages; exact captured heads; cancellation, timeout and their error statuses; independent PRs/commands; duplicate/rerun rejection; and fork-head access.
 Private-fork support needs its own environment and permission checks.
 Local port tests and generation checks do not prove hosted token permissions, event delivery, scheduling or fork access.
 Unperformed actor, fork or error checks remain unverified.

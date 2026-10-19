@@ -152,8 +152,14 @@ class CiPolicyTest(unittest.TestCase):
         self.assertIn("ref: ${{ github.sha }}", report)
         self.assertIn("persist-credentials: false", report)
         self.assertIn("comment_ci.py report", report)
+        self.assertIn("LOCK_GROUP: ${{ needs.validate.outputs.group }}", report)
         self.assertIn("VALIDATE_RESULT: ${{ needs.validate.result }}", report)
         self.assertIn("EXECUTE_RESULT: ${{ needs.execute.result }}", report)
+        # Timeout detection compares job duration with the execute job's limit.
+        spec = importlib.util.spec_from_file_location("comment_ci", ROOT / ".github/ci/comment_ci.py")
+        comment_ci = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(comment_ci)
+        self.assertIn(f"timeout-minutes: {comment_ci.EXECUTE_TIMEOUT_MINUTES}\n", sections["execute"])
         for forbidden in ("inputs.sha", "path: pr", "make ", "comment_ci.py execute",
                           "needs.execute.outputs", "download-artifact", "actions/cache",
                           "secrets.", "pull-requests: write"):

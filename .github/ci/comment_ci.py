@@ -1,6 +1,7 @@
 """Trusted command coordination. Never execute PR code with a writing token."""
 
 import argparse
+from datetime import datetime, timedelta
 import hashlib
 import json
 import os
@@ -16,6 +17,9 @@ from urllib.request import Request, urlopen
 
 WORKFLOW = "ci-command-worker.yml"
 WORKFLOW_PATH = f".github/workflows/{WORKFLOW}"
+EXECUTE_JOB = "Run PR command"
+# Equal to the execute job's timeout-minutes in the worker workflow.
+EXECUTE_TIMEOUT_MINUTES = 30
 REQUEST_FIELDS = ("pr", "command", "sha", "request", "controller", "base")
 OUTCOME_REASONS = {
     "-": None, "h": "PR head changed", "c": "Cancelled", "t": "Timed out",
@@ -69,7 +73,7 @@ def command_key(command):
 
 
 def group(repo, command):
-    # Preserve the existing writer group while serializing request bookkeeping and cancellation.
+    # Preserve the existing writer group while serializing bookkeeping, cancellation and results.
     return f"ci-command-{repo}-{command_key(command)}"
 
 
@@ -418,32 +422,81 @@ def check_worker(api, repo, anchor, inputs, run_id):
     return latest
 
 
-def report_worker(api, repo, anchor, inputs, run_id, results):
-    """Publish the bound owner's result under the controller lock; others write nothing."""
-    request = validate_request(inputs)
-    run_id = number(run_id)
-    latest, state = read_state(api, repo, anchor, request["pr"], request["command"])
-    if latest is None or payload(latest) != request or state != "pending" or latest["worker"] != run_id:
-        return None
-    # The live run's attempt rejects re-run jobs, including a re-run of this report job.
-    if not matching_run(api, repo, latest, api("GET", f"repos/{repo}/actions/runs/{run_id}")):
-        return None
+def timed_out(api, repo, run_id):
+    """Actions may report a job timeout as cancelled or failed; its duration tells them apart."""
+    try:
+        jobs = pages(api, f"repos/{repo}/actions/runs/{run_id}/attempts/1/jobs", "jobs")
+        job = next((job for job in jobs if job.get("name") == EXECUTE_JOB), None)
+        if job is None:
+            return False
+        if job.get("conclusion") == "timed_out":
+            return True
+        start, end = (
+            datetime.fromisoformat(job[key].replace("Z", "+00:00"))
+            for key in ("started_at", "completed_at")
+        )
+    except (RuntimeError, KeyError, TypeError, AttributeError, ValueError):
+        # Missing details keep the plain outcome; it is still nonpassing.
+        return False
+    return end - start >= timedelta(minutes=EXECUTE_TIMEOUT_MINUTES)
+
+
+def outcome(api, repo, request, run_id, results):
     validate, execute_result = results.get("validate"), results.get("execute")
     if validate == "success" and execute_result == "success":
-        state, reason = "success", None
+        return "success", None
+    if validate == "success" and execute_result in ("cancelled", "failure") and timed_out(api, repo, run_id):
+        state, reason = "error", "Timed out"
     elif "cancelled" in (validate, execute_result):
         state, reason = "error", "Cancelled"
     elif validate == "success" and execute_result == "failure":
         state, reason = "failure", "Worker failed"
     else:
         state, reason = "error", "Worker validation failed"
-    if state != "success":
-        pr = api("GET", f"repos/{repo}/pulls/{request['pr']}")
-        if pr["head"]["sha"] != request["sha"]:
-            state, reason = "error", "PR head changed"
-    # Write the public result first: a lost ledger write leaves a retryable pending request.
-    write_result(api, repo, latest, state, reason)
-    write_state(api, repo, anchor, latest, state, reason)
+    pr = api("GET", f"repos/{repo}/pulls/{request['pr']}")
+    if pr["head"]["sha"] != request["sha"]:
+        state, reason = "error", "PR head changed"
+    return state, reason
+
+
+def owns_pending_head(api, repo, request, run_id):
+    for status in pages(api, f"repos/{repo}/commits/{request['sha']}/statuses"):
+        if status["context"] == status_context(request["command"]):
+            return (
+                actions_status(status) and status["state"] == "pending"
+                and status["target_url"] == run_url(repo, run_id)
+            )
+    return False
+
+
+def report_worker(api, repo, anchor, inputs, run_id, results, lock):
+    """Publish a bound worker's result under the controller lock; others write nothing."""
+    request = validate_request(inputs)
+    run_id = number(run_id)
+    if lock != group(repo, request["command"]):
+        raise RuntimeError("Report lock is unavailable; post a new command.")
+    records = state_records(api, repo, anchor, request["pr"], request["command"])
+    latest, phase, _ = next(records, (None, None, None))
+
+    def bound(record):
+        return record is not None and payload(record) == request and record["worker"] == run_id
+
+    owner = latest if bound(latest) else next((r for r, _, _ in records if bound(r)), None)
+    # The live run's attempt rejects re-run jobs, including a re-run of this report job.
+    if owner is None or not matching_run(
+        api, repo, owner, api("GET", f"repos/{repo}/actions/runs/{run_id}")
+    ):
+        return None
+    current = owner is latest and phase == "pending"
+    # A superseded run may close only its own head status, never a newer request's.
+    if not current and not owns_pending_head(api, repo, owner, run_id):
+        return None
+    state, reason = outcome(api, repo, owner, run_id, results)
+    write_result(api, repo, owner, state, reason)
+    if current:
+        # Write the public result first. If this write fails, the request stays pending
+        # until a new command replaces it.
+        write_state(api, repo, anchor, owner, state, reason)
     return state
 
 
@@ -509,7 +562,10 @@ def main():
     elif args.stage == "report":
         inputs = json.loads(os.environ["COMMAND_INPUTS"])
         results = {"validate": os.environ["VALIDATE_RESULT"], "execute": os.environ["EXECUTE_RESULT"]}
-        report_worker(github_api, repo, anchor_commit(), inputs, os.environ["GITHUB_RUN_ID"], results)
+        report_worker(
+            github_api, repo, anchor_commit(), inputs, os.environ["GITHUB_RUN_ID"], results,
+            os.environ["LOCK_GROUP"],
+        )
     else:
         execute(os.environ["COMMAND"])
 

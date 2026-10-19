@@ -137,6 +137,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMAND_INPUTS: ${{ toJson(inputs) }}
+          # An empty lock name means this job did not hold the controller lock.
+          LOCK_GROUP: ${{ needs.validate.outputs.group }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
           EXECUTE_RESULT: ${{ needs.execute.result }}
         run: python3 .github/ci/comment_ci.py report

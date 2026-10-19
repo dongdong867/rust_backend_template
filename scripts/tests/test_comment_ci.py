@@ -23,7 +23,7 @@ def fixture():
         "permission": "write",
         "pr": {"state": "open", "head": {"sha": HEAD}},
         "prs": {"2": {"state": "open", "head": {"sha": HEAD}}},
-        "comments": {}, "last_edited": {}, "statuses": {}, "runs": {},
+        "comments": {}, "last_edited": {}, "statuses": {}, "runs": {}, "jobs": {},
         "next_run": 100, "calls": [],
     }
 
@@ -80,6 +80,9 @@ def fixture():
             data["runs"][run_id]["status"] = "completed"
             data["runs"][run_id]["conclusion"] = "cancelled"
             return None
+        if method == "GET" and "/attempts/1/jobs?" in path:
+            run_id = path.split("/runs/")[1].split("/")[0]
+            return {"jobs": copy.deepcopy(data["jobs"].get(run_id, []))}
         if method == "GET" and "/actions/runs/" in path:
             return copy.deepcopy(data["runs"][path.rsplit("/", 1)[1]])
         raise AssertionError(f"Unexpected API call: {method} {path}")
@@ -119,11 +122,22 @@ class CommentCiTest(unittest.TestCase):
     def head_status(self, sha=HEAD, context="ci-command /test"):
         return next((s for s in self.data["statuses"].get(sha, []) if s["context"] == context), None)
 
-    def report(self, request, validate="success", execute="success", run_id=None):
+    def report(self, request, validate="success", execute="success", run_id=None, lock=None,
+               api=None):
         return self.ci.report_worker(
-            self.api, REPO, ANCHOR, self.ci.payload(request), run_id or request["worker"],
+            api or self.api, REPO, ANCHOR, self.ci.payload(request), run_id or request["worker"],
             {"validate": validate, "execute": execute},
+            self.ci.group(REPO, request["command"]) if lock is None else lock,
         )
+
+    def execute_job(self, request, conclusion, minutes):
+        self.data["jobs"][request["worker"]] = [
+            {"name": "Validate accepted request", "conclusion": "success",
+             "started_at": "2026-10-20T00:00:00Z", "completed_at": "2026-10-20T00:00:10Z"},
+            {"name": "Run PR command", "conclusion": conclusion,
+             "started_at": "2026-10-20T00:01:00Z",
+             "completed_at": f"2026-10-20T00:{1 + minutes:02d}:05Z"},
+        ]
 
     def test_only_three_exact_command_forms(self):
         for text, expected in (
@@ -549,6 +563,7 @@ class CommentCiTest(unittest.TestCase):
         old = self.accept()
         new = self.accept(11)
         writes = len(self.mutations())
+        # Same head: the newer request owns the head status, so the old run writes nothing.
         self.assertIsNone(self.report(old))
         self.assertIsNone(self.report(new, run_id="999"))
         self.data["runs"][new["worker"]]["run_attempt"] = 2
@@ -559,6 +574,105 @@ class CommentCiTest(unittest.TestCase):
         self.assertEqual(len(self.mutations()), writes)
         self.assertEqual(self.head_status()["state"], "pending")
         self.assertEqual(self.head_status()["target_url"], self.ci.run_url(REPO, new["worker"]))
+
+    def test_superseded_run_closes_its_own_old_head_only_while_it_still_owns_it(self):
+        old = self.accept()
+        self.data["pr"]["head"]["sha"] = "d" * 40
+        new = self.accept(11)
+        self.assertEqual(self.report(old, "success", "cancelled"), "error")
+        self.assertEqual(self.head_status()["description"], "PR head changed; post a new command.")
+        self.assertEqual(self.head_status()["target_url"], self.ci.run_url(REPO, old["worker"]))
+        # The ledger still binds the newer request, and its head status is unchanged.
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (new, "pending"))
+        self.assertEqual(self.head_status("d" * 40)["state"], "pending")
+        # Once the old head is closed, or another run owns it, a superseded run writes nothing.
+        writes = len(self.mutations())
+        self.assertIsNone(self.report(old))
+        self.data["statuses"][HEAD][0]["state"] = "pending"
+        self.data["statuses"][HEAD][0]["target_url"] = self.ci.run_url(REPO, "555")
+        self.assertIsNone(self.report(old))
+        self.data["statuses"][HEAD][0]["target_url"] = self.ci.run_url(REPO, old["worker"])
+        self.data["statuses"][HEAD][0]["creator"] = {"login": "someone", "type": "User"}
+        self.assertIsNone(self.report(old))
+        self.assertEqual(len(self.mutations()), writes)
+
+    def test_superseded_report_requires_a_recorded_binding_and_first_attempt(self):
+        old = self.accept()
+        self.data["pr"]["head"]["sha"] = "d" * 40
+        self.accept(11)
+        writes = len(self.mutations())
+        self.assertIsNone(self.report(old, run_id="999"))
+        self.data["runs"][old["worker"]]["run_attempt"] = 2
+        self.assertIsNone(self.report(old))
+        self.assertEqual(len(self.mutations()), writes)
+        self.assertEqual(self.head_status()["state"], "pending")
+
+    def test_report_without_the_controller_lock_writes_nothing(self):
+        request = self.accept()
+        writes = len(self.mutations())
+        for lock in ("", "ci-command-other", self.ci.group(REPO, "lint")):
+            with self.subTest(lock=lock):
+                with self.assertRaisesRegex(RuntimeError, "lock"):
+                    self.report(request, lock=lock)
+        self.assertEqual(len(self.mutations()), writes)
+        self.assertEqual(self.head_status()["state"], "pending")
+
+    def test_execute_timeout_is_reported_as_timed_out(self):
+        for conclusion, minutes, expected in (
+            ("cancelled", 30, "Timed out"), ("timed_out", 30, "Timed out"),
+            ("cancelled", 3, "Cancelled"),
+        ):
+            with self.subTest(conclusion=conclusion, minutes=minutes):
+                self.data, self.api = fixture()
+                request = self.accept()
+                self.execute_job(request, conclusion, minutes)
+                self.assertEqual(self.report(request, "success", "cancelled"), "error")
+                self.assertEqual(self.head_status()["description"], f"{expected}; post a new command.")
+                _, _, reason = next(self.ci.state_records(self.api, REPO, ANCHOR, "1", "test"))
+                self.assertEqual(reason, expected)
+
+    def test_missing_execute_job_details_keep_the_cancelled_result(self):
+        request = self.accept()
+        self.data["jobs"][request["worker"]] = [{"name": "Run PR command", "conclusion": "cancelled"}]
+        self.assertEqual(self.report(request, "success", "cancelled"), "error")
+        self.assertEqual(self.head_status()["description"], "Cancelled; post a new command.")
+
+    def test_lost_cursor_write_after_report_leaves_head_result_and_pending_request(self):
+        request = self.accept()
+
+        def anchor_write_fails(method, path, body=None):
+            if method == "POST" and path.endswith(f"/statuses/{ANCHOR}"):
+                raise RuntimeError("GitHub API request failed.")
+            return self.api(method, path, body)
+
+        with self.assertRaisesRegex(RuntimeError, "API"):
+            self.report(request, api=anchor_write_fails)
+        # The public result was written before the internal cursor.
+        self.assertEqual(self.head_status()["state"], "success")
+        self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "pending"))
+        # A newer command still replaces the request normally.
+        newer = self.accept(11)
+        self.assertEqual(self.head_status()["target_url"], self.ci.run_url(REPO, newer["worker"]))
+
+    def test_lost_pending_head_write_still_admits_the_bound_worker(self):
+        event = comment(self.data)
+        route = self.ci.route_event(self.api, REPO, "issue_comment", event)
+
+        def head_write_fails(method, path, body=None):
+            if method == "POST" and path.endswith(f"/statuses/{HEAD}"):
+                raise RuntimeError("GitHub API request failed.")
+            return self.api(method, path, body)
+
+        with self.assertRaisesRegex(RuntimeError, "API"):
+            self.ci.accept_comment(head_write_fails, REPO, ANCHOR, route, "90")
+        request, phase = self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
+        self.assertEqual((request["worker"], phase), ("100", "pending"))
+        self.assertIsNone(self.head_status())
+        self.assertEqual(
+            self.ci.check_worker(self.api, REPO, ANCHOR, self.ci.payload(request), "100"), request
+        )
+        self.assertEqual(self.report(request), "success")
+        self.assertEqual(self.head_status()["state"], "success")
 
     def test_older_worker_cannot_replace_a_newer_head_result(self):
         old = self.accept()

@@ -178,7 +178,7 @@ Repeat checks with a new comment, not **Re-run jobs** or manual worker dispatch.
 
 Each accepted command shows a commit status on its captured head, such as `ci-command /test` or `ci-command /lint`.
 Package commands add a short hash suffix, so `/test-Foo` and `/test-foo` keep separate statuses.
-The status is pending while the worker runs, then success or failure. It is error when the run was cancelled, the head changed or validation failed.
+The status is pending while the worker runs, then success or failure. It is error when the run was cancelled or timed out, the head changed or validation failed.
 Its details link opens the **CI command worker** run with the ordinary logs.
 A new commit has no status until someone posts a new command.
 The original comment stays plain text; no bot comment, test-count report or coverage comparison is published.
