@@ -3,3 +3,6 @@
 # Local settings. Only the placeholder example is committed.
 *.env
 !.example.env
+
+# macOS Finder metadata.
+.DS_Store
