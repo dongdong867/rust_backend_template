@@ -177,17 +177,20 @@ Each accepted command captures the current head SHA. A changed head needs a fres
 Another identical command supersedes its earlier run, while different commands, packages and PRs execute independently.
 Repeat checks with a new comment, not **Re-run jobs** or manual worker dispatch.
 
-Results are available in GitHub Actions: open **CI command worker** and select the run whose title identifies the PR, command and captured SHA.
-Inspect **Validate accepted request** and **Run PR command** for the result and ordinary logs; failures, cancellation and timeouts are nonpassing.
-The original comment stays plain text. No bot result comment, test-count report, coverage comparison or custom PR-result status is published.
+Each accepted command shows a commit status on its captured head, such as `ci-command /test` or `ci-command /lint`.
+Package commands add a short hash suffix, so `/test-Foo` and `/test-foo` keep separate statuses.
+The status is pending while the worker runs, then success or failure. It is error when the run was cancelled or timed out, the head changed or validation failed.
+Its details link opens the **CI command worker** run with the ordinary logs.
+A new commit has no status until someone posts a new command.
+The original comment stays plain text; no bot comment, test-count report or coverage comparison is published.
 Historical `ci-comment` statuses may remain pending; they are not completion evidence or supported required checks.
-Do not require controller jobs, worker jobs or `ci-command-state/` bookkeeping contexts as a full-test merge gate.
+Do not require controller jobs, worker jobs or `ci-command-state/` bookkeeping contexts as a merge gate.
 
 The dispatcher, read-only worker and execution helpers are retained in generated services.
 They become active only after reaching the default branch; posting a command cannot test a new workflow definition that exists only on a PR.
 An authorized command explicitly approves execution of that PR head, including fork and draft code, on a read-only hosted worker with no production secrets.
 The controller uses trusted default-branch code and never executes the PR or its artifacts.
-Its status-writing permission is used only for internal request ownership, not PR results; no command job has PR-comment write permission.
+Only the controller and the worker's separate report job can write commit statuses, and neither checks out PR code; no command job has PR-comment write permission.
 See [the security and hosted-validation procedure](docs/ci-commands.md) for the execution and bookkeeping boundaries.
 This change does not enable branch protection or modify repository settings.
 

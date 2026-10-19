@@ -16,11 +16,20 @@ jobs:
       cancel-in-progress: false
       queue: max
 """
+WORKER = """name: worker
+on: push
+jobs:
+  report:
+    concurrency:
+      group: ci-command-control-${{ needs.validate.outputs.group }}
+      cancel-in-progress: false
+      queue: max
+"""
 MESSAGE = 'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'
 
 
 class CheckCiTests(unittest.TestCase):
-    def run_check(self, text=CANONICAL, errors=None, code=1, stdout=None, failure=None):
+    def run_check(self, text=CANONICAL, errors=None, code=1, stdout=None, failure=None, worker=WORKER):
         spec = importlib.util.spec_from_file_location(
             "check_ci", Path(__file__).resolve().parents[1] / "check_ci.py"
         )
@@ -31,7 +40,7 @@ class CheckCiTests(unittest.TestCase):
             workflows = root / ".github/workflows"
             workflows.mkdir(parents=True)
             (workflows / "ci-command.yml").write_text(text)
-            (workflows / "ci-command-completion.yml").write_text(text)
+            (workflows / "ci-command-worker.yml").write_text(worker)
             (workflows / "other.yml").write_text("name: other\n")
             result = subprocess.CompletedProcess([], code, stdout if stdout is not None else json.dumps(errors or []), "")
             with patch.object(module.subprocess, "run", side_effect=failure, return_value=result) as run:
@@ -39,7 +48,7 @@ class CheckCiTests(unittest.TestCase):
             if failure is None:
                 self.assertEqual(run.call_args.args[0], [
                     str(root / ".tools/bin/actionlint"), "-format", "{{json .}}",
-                    "-shellcheck=", "-pyflakes=", ".github/workflows/ci-command-completion.yml",
+                    "-shellcheck=", "-pyflakes=", ".github/workflows/ci-command-worker.yml",
                     ".github/workflows/ci-command.yml",
                     ".github/workflows/other.yml",
                 ])
@@ -51,29 +60,31 @@ class CheckCiTests(unittest.TestCase):
         error.update(changes)
         return error
 
+    def worker(self, **changes):
+        return self.diagnostic(filepath=".github/workflows/ci-command-worker.yml", **changes)
+
     def test_permitted_and_native_clean(self):
         self.assertEqual(self.run_check(errors=[self.diagnostic()]), 0)
-        self.assertEqual(self.run_check(errors=[
-            self.diagnostic(),
-            self.diagnostic(filepath=".github/workflows/ci-command-completion.yml"),
-        ]), 1)
+        self.assertEqual(self.run_check(errors=[self.worker()]), 0)
+        self.assertEqual(self.run_check(errors=[self.diagnostic(), self.worker()]), 0)
         self.assertEqual(self.run_check(code=0), 0)
 
     def test_other_diagnostics_and_duplicate_exceptions_fail(self):
         error = self.diagnostic()
-        completion = self.diagnostic(filepath=".github/workflows/ci-command-completion.yml")
+        worker = self.worker()
         for errors in ([error, self.diagnostic(message="other")], [error, error],
-                       [error, completion, completion],
-                       [error, completion, self.diagnostic(filepath=".github/workflows/other.yml")]):
+                       [error, worker, worker], [worker, self.worker(message="other")],
+                       [error, worker, self.diagnostic(filepath=".github/workflows/other.yml")]):
             with self.subTest(errors=errors):
                 self.assertEqual(self.run_check(errors=errors), 1)
 
     def test_wrong_diagnostic_location_or_kind_fails(self):
         for changes in (dict(filepath=".github/workflows/other.yml"), dict(line=7),
-                        dict(filepath=".github/workflows/ci-command-completion.yml"),
                         dict(column=8), dict(kind="other")):
             with self.subTest(changes=changes):
                 self.assertEqual(self.run_check(errors=[self.diagnostic(**changes)]), 1)
+                if "filepath" not in changes:
+                    self.assertEqual(self.run_check(errors=[self.worker(**changes)]), 1)
 
     def test_noncanonical_structures_fail(self):
         for text in (
@@ -89,9 +100,19 @@ class CheckCiTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertEqual(self.run_check(text=text, errors=[self.diagnostic()]), 1)
-                self.assertEqual(self.run_check(text=text, errors=[
-                    self.diagnostic(filepath=".github/workflows/ci-command-completion.yml")
-                ]), 1)
+        for text in (
+            WORKER.replace("  report:", "  execute:"),
+            WORKER.replace("needs.validate", "needs.route"),
+            WORKER.replace("ci-command-control-", "other-"),
+            WORKER.replace("queue: max", "queue: single"),
+            WORKER.replace("false", "true"),
+            WORKER + "      queue: max\n",
+            WORKER + WORKER,
+            # The controller mapping is valid only in the controller.
+            CANONICAL.replace("name: test", "name: worker"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.run_check(worker=text, errors=[self.worker()]), 1)
 
     def test_unknown_outputs_fail(self):
         for code, output in ((2, "[]"), (1, "[]"), (0, "garbage"),
