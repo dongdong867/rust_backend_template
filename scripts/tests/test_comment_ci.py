@@ -652,6 +652,8 @@ class CommentCiTest(unittest.TestCase):
             with self.subTest(execute=execute):
                 self.data, self.api = fixture()
                 request = self.accept()
+                # A working lookup would report this full-length job as timed out.
+                self.execute_job(request, execute, 30)
 
                 def jobs_unavailable(method, path, body=None):
                     if "/jobs?" in path:
