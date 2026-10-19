@@ -29,7 +29,8 @@ on:
         required: true
         type: string
 
-# No repository write token, application secrets, persisted credentials or shared caches.
+# Jobs that touch PR code get no write token, application secrets, persisted credentials
+# or shared caches. Only the report job, which never checks out PR code, writes statuses.
 permissions:
   contents: read
   actions: read
@@ -41,12 +42,20 @@ jobs:
     name: Validate accepted request
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    outputs:
+      group: ${{ steps.lock.outputs.group }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # Name the lock first so the report job still receives it when validation fails.
+      - name: Name the trusted request lock
+        id: lock
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: python3 .github/ci/comment_ci.py lock
       - name: Validate against trusted request state
         env:
           GH_TOKEN: ${{ github.token }}
@@ -101,3 +110,33 @@ jobs:
         env:
           COMMAND: ${{ inputs.command }}
         run: python3 ../trusted/.github/ci/comment_ci.py execute
+
+  report:
+    name: Report command result
+    needs: [validate, execute]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: write
+    # Result writes share the controller's request lock, so an older run cannot replace a newer request.
+    concurrency:
+      group: ci-command-control-${{ needs.validate.outputs.group }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish the bound request result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMAND_INPUTS: ${{ toJson(inputs) }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          EXECUTE_RESULT: ${{ needs.execute.result }}
+        run: python3 .github/ci/comment_ci.py report

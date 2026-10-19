@@ -1,4 +1,4 @@
-"""Exercise Actions-only acceptance and worker safety without executing PR code."""
+"""Exercise acceptance, worker safety and result statuses without executing PR code."""
 
 import copy
 import importlib.util
@@ -116,6 +116,15 @@ class CommentCiTest(unittest.TestCase):
     def mutations(self):
         return [call for call in self.data["calls"] if call[0] != "GET" and call[1] != "graphql"]
 
+    def head_status(self, sha=HEAD, context="ci-command /test"):
+        return next((s for s in self.data["statuses"].get(sha, []) if s["context"] == context), None)
+
+    def report(self, request, validate="success", execute="success", run_id=None):
+        return self.ci.report_worker(
+            self.api, REPO, ANCHOR, self.ci.payload(request), run_id or request["worker"],
+            {"validate": validate, "execute": execute},
+        )
+
     def test_only_three_exact_command_forms(self):
         for text, expected in (
             ("/lint", "lint"), ("/test", "test"), ("/test-tasks", "test-tasks"),
@@ -151,12 +160,12 @@ class CommentCiTest(unittest.TestCase):
         self.assertIsNone(self.ci.route_event(self.api, REPO, "issue_comment", event))
         self.assertFalse(self.mutations())
 
-    def test_actions_only_acceptance_records_head_and_binds_worker_without_public_status(self):
+    def test_acceptance_binds_worker_then_marks_captured_head_pending(self):
         request = self.accept()
         self.assertEqual(request["sha"], HEAD)
         self.assertEqual(request["worker"], "100")
         posts = [(path, body) for method, path, body in self.mutations() if method == "POST"]
-        self.assertEqual(len(posts), 3)
+        self.assertEqual(len(posts), 4)
         self.assertTrue(posts[0][0].endswith(f"/statuses/{ANCHOR}"))
         self.assertTrue(posts[1][0].endswith("/dispatches"))
         self.assertEqual(posts[1][1], {"ref": "main", "inputs": self.ci.payload(request)})
@@ -164,9 +173,14 @@ class CommentCiTest(unittest.TestCase):
         for path, body in (posts[0], posts[2]):
             self.assertTrue(body["context"].startswith("ci-command-state/"))
             self.assertLessEqual(len(body["description"]), 140)
-        self.assertNotIn(HEAD, self.data["statuses"])
+        # The head status is published only after the worker is bound, so it links to that run.
+        self.assertEqual(posts[3], (f"repos/{REPO}/statuses/{HEAD}", {
+            "context": "ci-command /test", "state": "pending",
+            "description": "Running the requested check.",
+            "target_url": self.ci.run_url(REPO, "100"),
+        }))
         self.assertEqual(self.ci.read_state(self.api, REPO, ANCHOR, "1", "test"), (request, "pending"))
-        # The fake API refuses all comment POST/PATCH and PR-head status calls are explicitly absent.
+        # The fake API refuses all comment POST/PATCH calls.
 
     def test_authorization_comment_and_deleted_comment_are_rechecked_inside_controller(self):
         event = comment(self.data)
@@ -364,7 +378,7 @@ class CommentCiTest(unittest.TestCase):
         self.assertIsNone(request["worker"])
         self.assertEqual(phase, "error")
 
-    def test_shared_sha_prs_execute_independently_without_public_status(self):
+    def test_shared_sha_prs_execute_independently_and_share_the_head_status(self):
         old = self.accept()
         new = self.accept(11, pr=2)
         for request in (old, new):
@@ -374,7 +388,10 @@ class CommentCiTest(unittest.TestCase):
             )
             self.assertEqual(self.data["runs"][request["worker"]]["status"], "queued")
         self.assertFalse(any(path.endswith("/cancel") for _, path, _ in self.data["calls"]))
-        self.assertNotIn(HEAD, self.data["statuses"])
+        # Both PRs tested identical code, so the last writer's result is valid for that SHA.
+        self.assertEqual(self.head_status()["target_url"], self.ci.run_url(REPO, new["worker"]))
+        self.assertEqual(self.report(old), "success")
+        self.assertEqual(self.head_status()["target_url"], self.ci.run_url(REPO, old["worker"]))
 
     def test_duplicate_dispatch_cannot_replace_bound_owner_even_after_original_rerun(self):
         request = self.accept()
@@ -457,7 +474,7 @@ class CommentCiTest(unittest.TestCase):
                 self.assertIsNotNone(self.ci.accept_comment(missing_api, REPO, ANCHOR, route, "90"))
                 self.assertEqual(len(self.data["runs"]), 2)
 
-    def test_missing_dispatch_id_or_api_failure_leaves_only_internal_error(self):
+    def test_missing_dispatch_id_or_api_failure_marks_head_error(self):
         for missing_id in (False, True):
             with self.subTest(missing_id=missing_id):
                 self.data, self.api = fixture()
@@ -477,7 +494,95 @@ class CommentCiTest(unittest.TestCase):
                 request, phase = self.ci.read_state(self.api, REPO, ANCHOR, "1", "test")
                 self.assertEqual(phase, "error")
                 self.assertIsNone(request["worker"])
-                self.assertNotIn(HEAD, self.data["statuses"])
+                self.assertEqual(self.head_status(), {
+                    "context": "ci-command /test", "state": "error",
+                    "description": "Dispatch failed; post a new command.",
+                    "target_url": self.ci.run_url(REPO, "90"),
+                    "creator": {"login": "github-actions[bot]", "type": "Bot"},
+                })
+
+    def test_report_maps_job_results_to_head_status_and_closes_the_request(self):
+        cases = (
+            ("success", "success", "success", "Requested check passed.", None),
+            ("success", "failure", "failure", "Requested check failed; see the worker run.",
+             "Worker failed"),
+            ("success", "cancelled", "error", "Cancelled; post a new command.", "Cancelled"),
+            ("cancelled", "skipped", "error", "Cancelled; post a new command.", "Cancelled"),
+            ("failure", "skipped", "error", "Worker validation failed; post a new command.",
+             "Worker validation failed"),
+            ("success", "unexpected", "error", "Worker validation failed; post a new command.",
+             "Worker validation failed"),
+        )
+        for validate, execute, state, description, reason in cases:
+            with self.subTest(validate=validate, execute=execute):
+                self.data, self.api = fixture()
+                request = self.accept()
+                self.assertEqual(self.report(request, validate, execute), state)
+                self.assertEqual(self.head_status(), {
+                    "context": "ci-command /test", "state": state, "description": description,
+                    "target_url": self.ci.run_url(REPO, request["worker"]),
+                    "creator": {"login": "github-actions[bot]", "type": "Bot"},
+                })
+                latest, phase, recorded = next(
+                    self.ci.state_records(self.api, REPO, ANCHOR, "1", "test")
+                )
+                self.assertEqual((latest, phase, recorded), (request, state, reason))
+                # A closed request cannot report again or admit its worker again.
+                writes = len(self.mutations())
+                self.assertIsNone(self.report(request))
+                self.assertEqual(len(self.mutations()), writes)
+                with self.assertRaisesRegex(RuntimeError, "completed"):
+                    self.ci.check_worker(
+                        self.api, REPO, ANCHOR, self.ci.payload(request), request["worker"]
+                    )
+
+    def test_report_names_a_changed_head_instead_of_a_failure(self):
+        request = self.accept()
+        self.data["pr"]["head"]["sha"] = "d" * 40
+        self.assertEqual(self.report(request, "success", "failure"), "error")
+        self.assertEqual(self.head_status()["description"], "PR head changed; post a new command.")
+        self.assertNotIn("d" * 40, self.data["statuses"])
+        _, _, reason = next(self.ci.state_records(self.api, REPO, ANCHOR, "1", "test"))
+        self.assertEqual(reason, "PR head changed")
+
+    def test_superseded_rerun_or_unbound_worker_reports_nothing(self):
+        old = self.accept()
+        new = self.accept(11)
+        writes = len(self.mutations())
+        self.assertIsNone(self.report(old))
+        self.assertIsNone(self.report(new, run_id="999"))
+        self.data["runs"][new["worker"]]["run_attempt"] = 2
+        self.assertIsNone(self.report(new))
+        self.data["runs"][new["worker"]]["run_attempt"] = 1
+        self.data["runs"][new["worker"]]["head_branch"] = "attacker"
+        self.assertIsNone(self.report(new))
+        self.assertEqual(len(self.mutations()), writes)
+        self.assertEqual(self.head_status()["state"], "pending")
+        self.assertEqual(self.head_status()["target_url"], self.ci.run_url(REPO, new["worker"]))
+
+    def test_older_worker_cannot_replace_a_newer_head_result(self):
+        old = self.accept()
+        new = self.accept(11)
+        self.assertEqual(self.report(new, "success", "failure"), "failure")
+        self.assertIsNone(self.report(old))
+        self.assertEqual(self.head_status()["state"], "failure")
+        self.assertEqual(self.head_status()["target_url"], self.ci.run_url(REPO, new["worker"]))
+
+    def test_head_status_contexts_are_distinct_for_case_sensitive_packages(self):
+        self.assertEqual(self.ci.status_context("lint"), "ci-command /lint")
+        self.assertEqual(self.ci.status_context("test"), "ci-command /test")
+        packages = ("test-environment", "test-Foo", "test-foo")
+        contexts = {self.ci.status_context(c).lower() for c in packages}
+        self.assertEqual(len(contexts), len(packages))
+        for command in packages:
+            self.assertTrue(self.ci.status_context(command).startswith(f"ci-command /{command}-"))
+        # Historical public statuses used a different context and are never rewritten.
+        self.assertFalse(any(self.ci.status_context(c).startswith("ci-comment") for c in packages))
+
+    def test_lock_stage_names_the_controller_lock_for_a_valid_command_only(self):
+        self.assertEqual(self.ci.lock_group(REPO, "test"), self.ci.group(REPO, "test"))
+        with self.assertRaisesRegex(RuntimeError, "Invalid command"):
+            self.ci.lock_group(REPO, "test me")
 
     def test_registration_visibility_retry_never_promotes_a_duplicate(self):
         request = self.accept()

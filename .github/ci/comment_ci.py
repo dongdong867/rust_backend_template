@@ -1,4 +1,4 @@
-"""Trusted command coordination. Never execute PR code with the controller token."""
+"""Trusted command coordination. Never execute PR code with a writing token."""
 
 import argparse
 import hashlib
@@ -21,6 +21,11 @@ OUTCOME_REASONS = {
     "-": None, "h": "PR head changed", "c": "Cancelled", "t": "Timed out",
     "f": "Worker failed", "v": "Worker validation failed", "u": "Worker unavailable",
     "d": "Dispatch failed", "r": "Unsupported rerun", "?": "Reason unavailable",
+}
+RESULT_TEXT = {
+    "pending": "Running the requested check.",
+    "success": "Requested check passed.",
+    "failure": "Requested check failed; see the worker run.",
 }
 
 
@@ -66,6 +71,18 @@ def command_key(command):
 def group(repo, command):
     # Preserve the existing writer group while serializing request bookkeeping and cancellation.
     return f"ci-command-{repo}-{command_key(command)}"
+
+
+def lock_group(repo, command):
+    if parse_command("/" + command) is None:
+        raise RuntimeError("Invalid command.")
+    return group(repo, command)
+
+
+def status_context(command):
+    # Status contexts are case-insensitive; package selectors are exact, case-sensitive names.
+    suffix = f"-{command_key(command)[:12]}" if command not in ("lint", "test") else ""
+    return f"ci-command /{command}{suffix}"
 
 
 def state_context(pr, command):
@@ -298,6 +315,16 @@ def write_state(api, repo, anchor, request, state, reason=None):
     })
 
 
+def write_result(api, repo, request, state, reason=None):
+    """The PR-head result people read. Ownership stays in the root-commit ledger."""
+    description = f"{reason}; post a new command." if state == "error" else RESULT_TEXT[state]
+    api("POST", f"repos/{repo}/statuses/{request['sha']}", {
+        "context": status_context(request["command"]), "state": state,
+        "description": description,
+        "target_url": run_url(repo, request["worker"] or request["controller"]),
+    })
+
+
 def cancel_obsolete(api, repo, anchor, request):
     """Cancel only previously bound owners for this PR/command, never concurrent other PRs."""
     seen = set()
@@ -337,7 +364,7 @@ def accept_comment(api, repo, anchor, route, controller):
     # immediately before accepting the request, not before those lookups.
     if not current_comment(api, repo, route):
         return None
-    # Persist acceptance before dispatch. Only this trusted controller writes the ledger.
+    # Persist acceptance before dispatch. Only trusted default-branch jobs write the ledger.
     write_state(api, repo, anchor, request, "pending")
     try:
         cancel_obsolete(api, repo, anchor, request)
@@ -349,7 +376,10 @@ def accept_comment(api, repo, anchor, route, controller):
         write_state(api, repo, anchor, request, "pending")
     except (RuntimeError, KeyError, TypeError):
         write_state(api, repo, anchor, request, "error", "Dispatch failed")
+        write_result(api, repo, request, "error", "Dispatch failed")
         raise RuntimeError("Command worker dispatch failed.") from None
+    # Publish after binding so the head status links to the run that owns it.
+    write_result(api, repo, request, "pending")
     return request
 
 
@@ -388,6 +418,35 @@ def check_worker(api, repo, anchor, inputs, run_id):
     return latest
 
 
+def report_worker(api, repo, anchor, inputs, run_id, results):
+    """Publish the bound owner's result under the controller lock; others write nothing."""
+    request = validate_request(inputs)
+    run_id = number(run_id)
+    latest, state = read_state(api, repo, anchor, request["pr"], request["command"])
+    if latest is None or payload(latest) != request or state != "pending" or latest["worker"] != run_id:
+        return None
+    # The live run's attempt rejects re-run jobs, including a re-run of this report job.
+    if not matching_run(api, repo, latest, api("GET", f"repos/{repo}/actions/runs/{run_id}")):
+        return None
+    validate, execute_result = results.get("validate"), results.get("execute")
+    if validate == "success" and execute_result == "success":
+        state, reason = "success", None
+    elif "cancelled" in (validate, execute_result):
+        state, reason = "error", "Cancelled"
+    elif validate == "success" and execute_result == "failure":
+        state, reason = "failure", "Worker failed"
+    else:
+        state, reason = "error", "Worker validation failed"
+    if state != "success":
+        pr = api("GET", f"repos/{repo}/pulls/{request['pr']}")
+        if pr["head"]["sha"] != request["sha"]:
+            state, reason = "error", "PR head changed"
+    # Write the public result first: a lost ledger write leaves a retryable pending request.
+    write_result(api, repo, latest, state, reason)
+    write_state(api, repo, anchor, latest, state, reason)
+    return state
+
+
 def execute(command):
     """Used only by the read-only worker, after every privileged step has finished."""
     if parse_command("/" + command) is None:
@@ -423,7 +482,7 @@ def output(values):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("route", "control", "worker-check", "execute"))
+    parser.add_argument("stage", choices=("route", "control", "lock", "worker-check", "execute", "report"))
     args = parser.parse_args()
     repo = os.environ["GITHUB_REPOSITORY"]
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
@@ -442,9 +501,15 @@ def main():
         if route.get("kind") != "comment":
             raise RuntimeError("Invalid controller route.")
         accept_comment(github_api, repo, anchor, route, number(os.environ["GITHUB_RUN_ID"]))
+    elif args.stage == "lock":
+        output({"group": lock_group(repo, os.environ["COMMAND"])})
     elif args.stage == "worker-check":
         inputs = json.loads(os.environ["COMMAND_INPUTS"])
         check_worker(github_api, repo, anchor_commit(), inputs, os.environ["GITHUB_RUN_ID"])
+    elif args.stage == "report":
+        inputs = json.loads(os.environ["COMMAND_INPUTS"])
+        results = {"validate": os.environ["VALIDATE_RESULT"], "execute": os.environ["EXECUTE_RESULT"]}
+        report_worker(github_api, repo, anchor_commit(), inputs, os.environ["GITHUB_RUN_ID"], results)
     else:
         execute(os.environ["COMMAND"])
 

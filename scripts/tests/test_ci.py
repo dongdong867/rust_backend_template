@@ -14,6 +14,14 @@ template_test = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(template_test)
 
 
+def jobs(text):
+    """Split a workflow's top-level jobs by their two-space keys."""
+    body = text.split("\njobs:\n", 1)[1]
+    names = re.findall(r"^  ([\w-]+):$", body, re.M)
+    parts = re.split(r"^  [\w-]+:$", body, flags=re.M)[1:]
+    return dict(zip(names, parts))
+
+
 class CiPolicyTest(unittest.TestCase):
     def workflow(self, name):
         return (ROOT / ".github/workflows" / name).read_text()
@@ -100,14 +108,19 @@ class CiPolicyTest(unittest.TestCase):
 
     def test_command_worker_has_non_cancelling_admission_and_no_write_permissions(self):
         text = self.workflow("ci-command-worker.yml")
+        sections = jobs(text)
+        self.assertEqual(list(sections), ["validate", "execute", "report"])
         self.assertIn("workflow_dispatch:", text)
         self.assertIn("name: Validate accepted request", text)
         self.assertIn("name: Run PR command", text)
         self.assertIn("needs: validate", text)
-        self.assertNotIn("concurrency:", text)
-        self.assertNotIn("cancel-in-progress:", text)
+        self.assertNotIn(": write", text.split("\njobs:\n", 1)[0])
+        for name in ("validate", "execute"):
+            with self.subTest(job=name):
+                self.assertNotIn("concurrency:", sections[name])
+                self.assertNotIn("cancel-in-progress:", sections[name])
+                self.assertNotIn(": write", sections[name])
         self.assertIn("contents: read", text)
-        self.assertNotIn(": write", text)
         self.assertNotIn("secrets.", text)
         self.assertNotIn("actions/cache", text)
         self.assertNotIn("upload-artifact", text)
@@ -118,6 +131,33 @@ class CiPolicyTest(unittest.TestCase):
         self.assertIn("comment_ci.py execute", text)
         # Expressions belong in step environment, not shell text.
         self.assertNotRegex(text, r"run:.*\$\{\{")
+
+    def test_command_report_job_writes_statuses_without_pr_code(self):
+        sections = jobs(self.workflow("ci-command-worker.yml"))
+        validate, report = sections["validate"], sections["report"]
+        self.assertIn("group: ${{ steps.lock.outputs.group }}", validate)
+        self.assertIn("comment_ci.py lock", validate)
+        self.assertLess(validate.index("comment_ci.py lock"), validate.index("comment_ci.py worker-check"))
+        self.assertIn("needs: [validate, execute]", report)
+        self.assertIn("if: always()", report)
+        self.assertEqual(re.findall(r"^      ([\w-]+): (read|write)$", report, re.M), [
+            ("contents", "read"), ("actions", "read"), ("pull-requests", "read"), ("statuses", "write"),
+        ])
+        # Result writes share the controller's request lock.
+        self.assertEqual(report.count(
+            "    concurrency:\n"
+            "      group: ci-command-control-${{ needs.validate.outputs.group }}\n"
+            "      cancel-in-progress: false\n"
+            "      queue: max\n"), 1)
+        self.assertIn("ref: ${{ github.sha }}", report)
+        self.assertIn("persist-credentials: false", report)
+        self.assertIn("comment_ci.py report", report)
+        self.assertIn("VALIDATE_RESULT: ${{ needs.validate.result }}", report)
+        self.assertIn("EXECUTE_RESULT: ${{ needs.execute.result }}", report)
+        for forbidden in ("inputs.sha", "path: pr", "make ", "comment_ci.py execute",
+                          "needs.execute.outputs", "download-artifact", "actions/cache",
+                          "secrets.", "pull-requests: write"):
+            self.assertNotIn(forbidden, report)
 
     def test_only_source_workflow_is_excluded_from_generation(self):
         excluded = (ROOT / ".genignore").read_text().splitlines()
@@ -146,13 +186,15 @@ class CiPolicyTest(unittest.TestCase):
             self.assertIn("For private repositories", text)
             self.assertIn("without write permission", text)
 
-    def test_actions_only_guidance_does_not_promise_reports_or_required_statuses(self):
-        for name in ("README.md", "README.md.liquid"):
-            text = (ROOT / name).read_text()
-            self.assertIn("Results are available in GitHub Actions", text)
-            self.assertNotIn("Completed runs receive one updated bot result comment", text)
-            self.assertNotIn("require only **`ci-comment /test`**", text)
-            self.assertIn("Historical `ci-comment` statuses", text)
+    def test_guidance_describes_head_statuses_without_bot_comments(self):
+        for name in ("README.md", "README.md.liquid", "docs/ci-commands.md"):
+            with self.subTest(name=name):
+                text = (ROOT / name).read_text()
+                self.assertIn("`ci-command /test`", text)
+                self.assertNotIn("bot result comment is published", text.replace("\n", " "))
+                self.assertNotIn("Actions-only", text)
+                self.assertNotIn("Completed runs receive one updated bot result comment", text)
+                self.assertIn("Historical `ci-comment` statuses", text)
 
     def test_tool_versions_come_from_make(self):
         result = subprocess.check_output(

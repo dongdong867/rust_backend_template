@@ -1,4 +1,4 @@
-"""Validate original workflows with one narrow actionlint 1.7.12 exception."""
+"""Validate original workflows with two narrow actionlint 1.7.12 exceptions."""
 
 import json
 from pathlib import Path
@@ -8,18 +8,27 @@ import sys
 
 
 CONTROLLER = ".github/workflows/ci-command.yml"
+WORKER = ".github/workflows/ci-command-worker.yml"
 MESSAGE = 'unexpected key "queue" for "concurrency" section. expected one of "cancel-in-progress", "group"'
-MAPPING = [
-    "    concurrency:",
-    "      group: ci-command-control-${{ needs.route.outputs.group }}",
-    "      cancel-in-progress: false",
-    "      queue: max",
-]
 
 
-def permitted_line(root):
-    """Recognize only the canonical block directly inside jobs.control."""
-    lines = (root / CONTROLLER).read_text().splitlines()
+def mapping(needs):
+    return [
+        "    concurrency:",
+        f"      group: ci-command-control-${{{{ needs.{needs}.outputs.group }}}}",
+        "      cancel-in-progress: false",
+        "      queue: max",
+    ]
+
+
+# Each workflow may hold the shared request lock in exactly one job.
+SITES = {CONTROLLER: ("  control:", mapping("route")), WORKER: ("  report:", mapping("validate"))}
+
+
+def permitted_line(root, workflow):
+    """Recognize only the canonical block directly inside the workflow's lock job."""
+    name, block = SITES[workflow]
+    lines = (root / workflow).read_text().splitlines()
     sites = []
     job = None
     section = None
@@ -29,11 +38,11 @@ def permitted_line(root):
             job = None
         if re.match(r"^  \S", line):
             job = line
-        if section == "jobs:" and job == "  control:" and lines[index:index + 4] == MAPPING:
+        if section == "jobs:" and job == name and lines[index:index + 4] == block:
             sites.append(index + 4)
     # Extra queue keys cannot be validated by this narrow compatibility rule.
     # Actionlint still checks all YAML, including quoted/inline duplicate keys.
-    if len(sites) != 1 or lines.count(MAPPING[-1]) != 1:
+    if len(sites) != 1 or lines.count(block[-1]) != 1:
         return None
     return sites[0]
 
@@ -66,16 +75,21 @@ def check(root):
                 raise ValueError("unrecognized actionlint diagnostic")
         if (result.returncode == 0) != (len(errors) == 0):
             raise ValueError("actionlint exit code disagrees with diagnostic output")
-        line = permitted_line(root) if errors else None
-        permitted = [
-            error for error in errors
-            if error["message"] == MESSAGE and error["kind"] == "syntax-check"
-            and error["filepath"] == CONTROLLER and error["line"] == line
-            and error["column"] == 7
-        ]
-        remaining = errors if len(permitted) != 1 else [
-            error for error in errors if error is not permitted[0]
-        ]
+        permitted = []
+        for workflow in SITES:
+            if not any(error["filepath"] == workflow for error in errors):
+                continue
+            line = permitted_line(root, workflow)
+            matches = [
+                error for error in errors
+                if error["message"] == MESSAGE and error["kind"] == "syntax-check"
+                and error["filepath"] == workflow and error["line"] == line
+                and error["column"] == 7
+            ]
+            if len(matches) == 1:
+                permitted.extend(matches)
+        remaining = [error for error in errors
+                     if not any(error is allowed for allowed in permitted)]
         if remaining:
             for error in remaining:
                 print(f'{error["filepath"]}:{error["line"]}:{error["column"]}: '
