@@ -27,9 +27,9 @@ Its `statuses: write` permission maintains internal ownership records on the roo
 It checks out trusted `github.sha` and never evaluates PR source, Makefiles, toolchain files, caches or artifacts.
 
 Worker jobs that validate or execute have read-only permissions and non-persisted checkout credentials.
-No production secret, writable token, privileged environment or self-hosted runner is used for PR execution.
+No production secret, repository write token, privileged environment or self-hosted runner is used for PR execution.
 PR code can still obtain the execute job's cache token.
-The worker runs on the default branch, so that code can write default-branch cache entries, which later default-branch and PR workflows such as `template-ci.yml` restore.
+The worker runs on the default branch, so that code can write default-branch cache entries, which later default-branch and PR workflows that use caches, such as the source repository's `template-ci.yml`, can restore.
 Read the PR code before posting a command.
 Do not enable private-fork settings that send write tokens or secrets to PR workflows.
 An authorized command explicitly approves execution of the captured code; fork-workflow approval settings do not replace this authorization.
@@ -95,7 +95,8 @@ No completion workflow, bot result comment, log-summary download, test-count rep
 Historical `ci-comment` statuses may remain pending and are deliberately not rewritten or treated as passing results.
 Do not configure them, controller jobs, worker jobs or internal cursor contexts as a required-check gate.
 `ci-command /test` is not a required check, by decision after security review.
-GitHub matches required checks by name, and a fork PR workflow can create a passing check with the same name.
+GitHub matches required checks by name.
+Pinning the expected app does not help: a fork PR workflow also reports as GitHub Actions and can create a passing check with the same name.
 
 The controller, worker and execution helpers must reach the default branch before hosted QA can exercise this version.
 Both generated variants retain the same execution support.
