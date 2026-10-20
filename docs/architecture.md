@@ -108,3 +108,10 @@ Routing and acceptance reject edited comments using explicit GitHub edit metadat
 A separate trusted report job publishes the bound request's result as a `ci-command /<command>` status on the captured head; no bot report is published.
 Command statuses are not a configured required-check gate.
 See [command security and hosted validation](ci-commands.md) before changing these boundaries.
+
+## Release
+
+A hand-started `release.yml` run on `main` verifies a commit, then creates its `vX.Y.Z` tag and GitHub Release.
+The service package is the only workspace package with a binary target; only its version must match the tag.
+Verification has a read-only token. It runs the trusted `.github/ci/release.py` from the workflow commit and checks out the release commit separately.
+Only the publish job has `contents: write`, and it skips dry runs.

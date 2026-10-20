@@ -194,6 +194,26 @@ Only the controller and the worker's separate report job can write commit status
 See [the security and hosted-validation procedure](docs/ci-commands.md) for the execution and bookkeeping boundaries.
 This change does not enable branch protection or modify repository settings.
 
+### Release a version
+
+A maintainer releases by hand. Pushes and merges never create a tag.
+Set the service package `version` in its `Cargo.toml` and merge that change to `main`.
+Internal crates stay at `0.1.0` with `publish = false`; only the service package version must match the tag.
+Then open **Actions > Release > Run workflow**, or run:
+
+```sh
+gh workflow run release.yml -f version=1.2.3
+```
+
+`commit` selects an older `main` commit; it defaults to the current `main` head.
+`dry_run` defaults to true: the run checks everything and creates nothing.
+Run it again with `-f dry_run=false` to create the `v1.2.3` tag and a GitHub Release with generated notes.
+
+The run fails before any tag exists when the version is not `X.Y.Z`, the commit is not on `main`, the service package version differs, the tag already exists, or any existing check or status on the commit failed or is still running.
+It then runs `make lint` and `make test` with default features and `api-doc` on the commit.
+Only the final job, which runs after every check passes, has permission to write.
+Anyone with write access can run the workflow, so it adds no approval beyond repository permissions.
+
 ## Changing the service
 
 Read [AGENTS.md](AGENTS.md) for coding rules and required checks.
