@@ -165,6 +165,47 @@ class CiPolicyTest(unittest.TestCase):
                           "secrets.", "pull-requests: write"):
             self.assertNotIn(forbidden, report)
 
+    def test_release_runs_only_by_hand_and_writes_only_after_verification(self):
+        text = self.workflow("release.yml")
+        self.assertEqual(text.split("\non:\n", 1)[1].split("\n")[0], "  workflow_dispatch:")
+        self.assertNotRegex(text, r"(?m)^  (push|pull_request|schedule|workflow_run|release):")
+        self.assertIn("      dry_run:\n", text)
+        self.assertRegex(text, r"dry_run:\n(        .*\n)*?        default: true\n")
+        self.assertIn("permissions: {}", text)
+        self.assertIn("cancel-in-progress: false", text)
+        self.assertNotIn("secrets.", text)
+        self.assertNotIn("continue-on-error", text)
+        self.assertNotIn("actions/cache", text)
+        for action in re.findall(r"^\s+(?:- )?uses: ([^\s]+)", text, re.M):
+            self.assertRegex(action, r"^[\w./-]+@[a-f0-9]{40}$")
+        # Inputs reach scripts only through env, never shell text.
+        for line in re.findall(r"^\s+run: .*$", text, re.M):
+            self.assertNotIn("${{", line)
+        sections = jobs(text)
+        self.assertEqual(sorted(sections), ["publish", "verify"])
+        verify, publish = sections["verify"], sections["publish"]
+        self.assertEqual(re.findall(r"^      ([\w-]+): (read|write)$", verify, re.M), [
+            ("contents", "read"), ("actions", "read"), ("checks", "read"), ("statuses", "read"),
+        ])
+        self.assertEqual(re.findall(r"^      ([\w-]+): (read|write)$", publish, re.M), [
+            ("contents", "write"),
+        ])
+        self.assertIn("needs: verify", publish)
+        self.assertIn("if: ${{ !inputs.dry_run }}", publish)
+        self.assertIn("release.py publish", publish)
+        self.assertIn("SHA: ${{ needs.verify.outputs.sha }}", publish)
+        for forbidden in ("make ", "path: release", "inputs.commit"):
+            self.assertNotIn(forbidden, publish)
+        # The trusted script runs from the workflow commit; the release commit is checked separately.
+        self.assertIn("ref: ${{ github.sha }}", verify)
+        self.assertIn("path: release", verify)
+        self.assertLess(verify.index("release.py verify"), verify.index("make lint"))
+        for target in ("make lint", "make test FEATURES=\n", "make test FEATURES=api-doc"):
+            self.assertIn(target, verify)
+        for section in (verify, publish):
+            self.assertIn("persist-credentials: false", section)
+            self.assertRegex(section, r"timeout-minutes: \d+")
+
     def test_only_source_workflow_is_excluded_from_generation(self):
         excluded = (ROOT / ".genignore").read_text().splitlines()
         self.assertIn("/.github/workflows/template-ci.yml", excluded)
@@ -246,6 +287,7 @@ class GeneratedCiTest(unittest.TestCase):
             ".github/workflows/format.yml", ".github/dependabot.yml",
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
+            ".github/workflows/release.yml", ".github/ci/release.py",
         )
         for name in self.files:
             for root in (self.source, self.project):
@@ -264,6 +306,7 @@ class GeneratedCiTest(unittest.TestCase):
         for name in (
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
+            ".github/workflows/release.yml", ".github/ci/release.py",
         ):
             self.assertTrue((ROOT / name).is_file(), f"Missing shared command support: {name}")
         for name in (

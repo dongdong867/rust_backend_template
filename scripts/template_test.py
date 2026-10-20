@@ -20,6 +20,7 @@ SHARED_CI_FILES = (
     ".github/workflows/format.yml", ".github/dependabot.yml",
     ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
     ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
+    ".github/workflows/release.yml", ".github/ci/release.py",
 )
 
 
