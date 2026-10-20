@@ -202,6 +202,23 @@ class CiPolicyTest(unittest.TestCase):
                 self.assertNotIn("Completed runs receive one updated bot result comment", text)
                 self.assertIn("Historical `ci-comment` statuses", text)
 
+    def test_guidance_names_the_command_cache_write_risk(self):
+        # The worker runs on the default branch, so PR code can write its cache scope.
+        for name in ("README.md", "README.md.liquid", "docs/ci-commands.md", "docs/architecture.md"):
+            with self.subTest(name=name):
+                text = (ROOT / name).read_text().replace("\n", " ")
+                self.assertNotIn("shared writable cache", text)
+                self.assertNotIn("writable token", text)
+                self.assertNotIn("later CI runs restore", text)
+                self.assertIn("default-branch cache entries", text)
+                if name != "docs/architecture.md":
+                    self.assertIn("read the pr code before posting a command", text.lower())
+        self.assertNotIn("shared caches", (ROOT / ".github/workflows/ci-command-worker.yml").read_text())
+        text = (ROOT / "docs/ci-commands.md").read_text().replace("\n", " ")
+        self.assertIn("`ci-command /test` is not a required check", text)
+        self.assertIn("GitHub matches required checks by name", text)
+        self.assertIn("also reports as GitHub Actions", text)
+
     def test_tool_versions_come_from_make(self):
         result = subprocess.check_output(
             ["make", "--no-print-directory", "tool-versions"], cwd=ROOT, text=True

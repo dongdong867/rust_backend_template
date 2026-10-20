@@ -188,6 +188,7 @@ Do not require controller jobs, worker jobs or `ci-command-state/` bookkeeping c
 The dispatcher, read-only worker and execution helpers are retained in generated services.
 They become active only after reaching the default branch; posting a command cannot test a new workflow definition that exists only on a PR.
 An authorized command explicitly approves execution of that PR head, including fork and draft code, on a read-only hosted worker with no production secrets.
+That code can write default-branch cache entries that later workflows can restore, so read the PR code before posting a command.
 The controller uses trusted default-branch code and never executes the PR or its artifacts.
 Only the controller and the worker's separate report job can write commit statuses, and neither checks out PR code; no command job has PR-comment write permission.
 See [the security and hosted-validation procedure](docs/ci-commands.md) for the execution and bookkeeping boundaries.

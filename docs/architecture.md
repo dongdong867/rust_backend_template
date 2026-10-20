@@ -98,7 +98,8 @@ For required commands and when to run them, see [AGENTS.md](../AGENTS.md#command
 ## Maintainer-requested CI
 
 The command controller accepts requests using only trusted default-branch code.
-PR evaluation belongs exclusively to read-only hosted workers with no production secrets or shared writable cache.
+PR evaluation belongs exclusively to read-only hosted workers with no production secrets.
+Workers run on the default branch, so PR code can write default-branch cache entries.
 Acceptance, cancellation, bookkeeping and result-status writes share one non-cancelling repository/command lock.
 Workers never automatically cancel each other; the controller cancels only bound obsolete run IDs for the same PR and command.
 Durable request cursors on the single repository root commit preserve ordering across head updates.

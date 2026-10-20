@@ -29,8 +29,9 @@ on:
         required: true
         type: string
 
-# Jobs that touch PR code get no write token, application secrets, persisted credentials
-# or shared caches. Only the report job, which never checks out PR code, writes statuses.
+# Jobs that touch PR code get no repository write token, application secrets or persisted
+# credentials. PR code can still write default-branch cache entries.
+# Only the report job, which never checks out PR code, writes statuses.
 permissions:
   contents: read
   actions: read
