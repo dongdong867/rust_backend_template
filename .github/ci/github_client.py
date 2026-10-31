@@ -7,6 +7,8 @@ from urllib.request import Request, urlopen
 
 
 API_VERSION = "2026-03-10"
+# The command ledger's bookkeeping statuses on the root commit; they are not test results.
+COMMAND_STATE_PREFIX = "ci-command-state/"
 
 
 def request(method, path, body=None, tolerate=None):

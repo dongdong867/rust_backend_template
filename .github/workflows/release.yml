@@ -9,11 +9,6 @@ on:
         description: Service package version to release, X.Y.Z
         required: true
         type: string
-      commit:
-        description: Commit on main to release; empty means the current main head
-        required: false
-        default: ""
-        type: string
       dry_run:
         description: Run every check without creating the tag or release
         required: false
@@ -37,41 +32,20 @@ jobs:
       actions: read
       checks: read
       statuses: read
-    outputs:
-      sha: ${{ steps.verify.outputs.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
-          path: trusted
-          persist-credentials: false
-      - name: Resolve the release commit
-        id: resolve
-        working-directory: trusted
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMMIT: ${{ inputs.commit }}
-        run: python3 .github/ci/release.py resolve
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ steps.resolve.outputs.sha }}
-          path: release
           persist-credentials: false
       - name: Install pinned Rust from the release toolchain
-        working-directory: release
         run: rustup show active-toolchain
       - name: Check version, tag and existing checks
-        id: verify
-        working-directory: trusted
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-          SHA: ${{ steps.resolve.outputs.sha }}
-          RELEASE_PATH: ${{ github.workspace }}/release
         run: python3 .github/ci/release.py verify
       - name: Read tool pins
         id: tools
-        working-directory: release
         run: make --no-print-directory tool-versions >> "$GITHUB_OUTPUT"
       - name: Install prebuilt Taplo
         uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
@@ -79,13 +53,10 @@ jobs:
           tool: taplo@${{ steps.tools.outputs.taplo }}
           fallback: none
       - name: Lint
-        working-directory: release
         run: make lint
       - name: Default fast tests
-        working-directory: release
         run: make test FEATURES=
       - name: API documentation fast tests
-        working-directory: release
         run: make test FEATURES=api-doc
 
   publish:
@@ -105,5 +76,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-          SHA: ${{ needs.verify.outputs.sha }}
         run: python3 .github/ci/release.py publish

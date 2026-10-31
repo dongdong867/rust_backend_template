@@ -196,12 +196,13 @@ class CiPolicyTest(unittest.TestCase):
         self.assertIn("needs: verify", publish)
         self.assertIn("if: ${{ !inputs.dry_run }}", publish)
         self.assertIn("release.py publish", publish)
-        self.assertIn("SHA: ${{ needs.verify.outputs.sha }}", publish)
-        for forbidden in ("make ", "path: release", "inputs.commit"):
-            self.assertNotIn(forbidden, publish)
-        # The trusted script runs from the workflow commit; the release commit is checked separately.
-        self.assertIn("ref: ${{ github.sha }}", verify)
-        self.assertIn("path: release", verify)
+        self.assertNotIn("make ", publish)
+        # A release is always the commit the run started on, so no input can choose another.
+        self.assertNotIn("inputs.commit", text)
+        self.assertNotIn("      commit:\n", text)
+        for section in (verify, publish):
+            self.assertEqual(section.count("actions/checkout@"), 1)
+            self.assertIn("ref: ${{ github.sha }}", section)
         self.assertLess(verify.index("release.py verify"), verify.index("make lint"))
         for target in ("make lint", "make test FEATURES=\n", "make test FEATURES=api-doc"):
             self.assertIn(target, verify)

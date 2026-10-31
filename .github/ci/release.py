@@ -14,7 +14,7 @@ import github_client
 
 # Any cancelled check run passes; this run repeats only lint and fast tests.
 PASSING = ("success", "neutral", "skipped", "cancelled")
-# Only these events test the commit they report on. Manual, comment and scheduled runs
+# These runs report on their own push or PR head. Manual, comment and scheduled runs
 # report on the main head at start time, whatever they test.
 COMMIT_EVENTS = ("push", "pull_request")
 
@@ -53,14 +53,10 @@ def require_tag_absent(api, repo, tag):
         raise RuntimeError(f"Tag {tag} already exists; choose a new version.")
 
 
-def resolve_commit(api, repo, commit):
-    if commit == "":
-        return parse_sha(api("GET", f"repos/{repo}/commits/main")["sha"])
-    sha = parse_sha(commit)
-    # compare/{commit}...main is identical or ahead only when main contains the commit.
-    if api("GET", f"repos/{repo}/compare/{sha}...main")["status"] not in ("identical", "ahead"):
-        raise RuntimeError("Commit is not on main.")
-    return sha
+def require_main_head(api, repo, sha):
+    # GITHUB_TOKEN cannot release a commit that differs from main in workflow files.
+    if api("GET", f"repos/{repo}/commits/main")["sha"] != sha:
+        raise RuntimeError("main has moved past this run's commit; start the release again.")
 
 
 def service_version(metadata):
@@ -76,26 +72,23 @@ def service_version(metadata):
     return services[0]["version"]
 
 
-def unrelated_suites(api, repo, sha, run_id):
-    """Check suites on the commit from this run and from Actions runs that do not test it."""
-    own = api("GET", f"repos/{repo}/actions/runs/{run_id}")
-    runs = github_client.pages(api, f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
-    return {own["check_suite_id"]} | {
-        run["check_suite_id"] for run in runs if run["event"] not in COMMIT_EVENTS
-    }
+def passed(item):
+    return item["status"] == "completed" and item["conclusion"] in PASSING
 
 
 def require_passing_checks(api, repo, sha, run_id):
-    """Every check and status about the commit must pass."""
-    ignored = unrelated_suites(api, repo, sha, run_id)
-    failing = []
-    for run in github_client.pages(api, f"repos/{repo}/commits/{sha}/check-runs", "check_runs"):
-        if run["check_suite"]["id"] in ignored:
-            continue
-        if run["status"] != "completed" or run["conclusion"] not in PASSING:
-            failing.append(run["name"])
+    """Every run, check and status about the commit must pass."""
+    own = api("GET", f"repos/{repo}/actions/runs/{run_id}")["check_suite_id"]
+    runs = list(github_client.pages(api, f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs"))
+    ignored = {own} | {run["check_suite_id"] for run in runs if run["event"] not in COMMIT_EVENTS}
+    # A run that fails to start, or has not created its first job, has no check runs to read.
+    failing = [run["name"] for run in runs
+               if run["check_suite_id"] not in ignored and not passed(run)]
+    for check in github_client.pages(api, f"repos/{repo}/commits/{sha}/check-runs", "check_runs"):
+        if check["check_suite"]["id"] not in ignored and not passed(check):
+            failing.append(check["name"])
     for status in github_client.pages(api, f"repos/{repo}/commits/{sha}/status", "statuses"):
-        if status["state"] != "success":
+        if status["state"] != "success" and not status["context"].startswith(github_client.COMMAND_STATE_PREFIX):
             failing.append(status["context"])
     if failing:
         raise RuntimeError(
@@ -104,25 +97,25 @@ def require_passing_checks(api, repo, sha, run_id):
         )
 
 
-def verify(api, repo, inputs, run_id, ref, read_metadata):
+def verify(api, repo, version, sha, run_id, ref, read_metadata):
     """Read-only checks; any failure stops the run before a tag can exist."""
     if ref != "refs/heads/main":
         raise RuntimeError("Run the release workflow from main.")
-    version = parse_version(inputs["version"])
-    tag = f"v{version}"
-    sha = resolve_commit(api, repo, inputs["commit"])
+    version = parse_version(version)
+    sha = parse_sha(sha)
+    require_main_head(api, repo, sha)
     found = service_version(read_metadata(sha))
     if found != version:
         raise RuntimeError(f"Version {version} does not match the service package version {found}.")
-    require_tag_absent(api, repo, tag)
+    require_tag_absent(api, repo, f"v{version}")
     require_passing_checks(api, repo, sha, run_id)
-    return {"sha": sha, "tag": tag}
 
 
 def publish(api, repo, version, sha):
     tag = f"v{parse_version(version)}"
     sha = parse_sha(sha)
     require_tag_absent(api, repo, tag)
+    require_main_head(api, repo, sha)
     api("POST", f"repos/{repo}/releases", {
         "tag_name": tag, "target_commitish": sha, "name": tag, "generate_release_notes": True,
     })
@@ -142,27 +135,20 @@ def checkout_metadata(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("resolve", "verify", "publish"))
+    parser.add_argument("stage", choices=("verify", "publish"))
     args = parser.parse_args()
     repo = os.environ["GITHUB_REPOSITORY"]
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise RuntimeError("Invalid repository identity.")
-    if args.stage == "resolve":
-        sha = resolve_commit(github_api, repo, os.environ["COMMIT"])
-        output = {"sha": sha}
-    elif args.stage == "verify":
-        inputs = {"version": os.environ["VERSION"], "commit": os.environ["SHA"]}
-        output = verify(
-            github_api, repo, inputs, os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_REF"],
-            checkout_metadata(Path(os.environ["RELEASE_PATH"])),
+    version, sha = os.environ["VERSION"], os.environ["GITHUB_SHA"]
+    if args.stage == "verify":
+        verify(
+            github_api, repo, version, sha, os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_REF"],
+            checkout_metadata(Path.cwd()),
         )
     else:
-        publish(github_api, repo, os.environ["VERSION"], os.environ["SHA"])
-        print(f"Released v{os.environ['VERSION']} at {os.environ['SHA']}.")
-        return
-    with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
-        for key, value in output.items():
-            stream.write(f"{key}={value}\n")
+        publish(github_api, repo, version, sha)
+        print(f"Released v{version} at {sha}.")
 
 
 if __name__ == "__main__":

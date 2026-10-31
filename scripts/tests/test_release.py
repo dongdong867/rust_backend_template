@@ -39,7 +39,7 @@ SERVICE = metadata(("my-service", "1.2.3", ("lib", "bin", "test")),
 
 def fixture():
     data = {
-        "main": MAIN, "compare": {MAIN: "identical", OLDER: "ahead"},
+        "main": MAIN,
         "tags": {}, "check_runs": {}, "statuses": {}, "suite": 7, "calls": [],
         "workflow_runs": {},
         "release_tag_sha": None,
@@ -50,9 +50,6 @@ def fixture():
         prefix = f"repos/{REPO}"
         if method == "GET" and path == f"{prefix}/commits/main":
             return {"sha": data["main"]}
-        if method == "GET" and path.startswith(f"{prefix}/compare/"):
-            base = path[len(f"{prefix}/compare/"):].split("...")[0]
-            return {"status": data["compare"].get(base, "diverged")}
         if method == "GET" and path.startswith(f"{prefix}/git/ref/tags/"):
             tag = path.rsplit("/", 1)[1]
             sha = data["tags"].get(tag)
@@ -86,57 +83,52 @@ def check(name, status="completed", conclusion="success", suite=1):
     return {"name": name, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
 
 
-def inputs(version="1.2.3", commit=""):
-    return {"version": version, "commit": commit}
+def workflow_run(suite, event, status="completed", conclusion="success", name="Workflow"):
+    return {"check_suite_id": suite, "event": event, "status": status, "conclusion": conclusion,
+            "name": name, "head_sha": MAIN}
 
 
 class VerifyTest(unittest.TestCase):
     def setUp(self):
         self.data, self.api = fixture()
 
-    def verify(self, values=None, packages=SERVICE, ref="refs/heads/main"):
-        return release.verify(self.api, REPO, values or inputs(), RUN, ref, lambda sha: packages)
+    def verify(self, version="1.2.3", sha=MAIN, packages=SERVICE, ref="refs/heads/main"):
+        release.verify(self.api, REPO, version, sha, RUN, ref, lambda _: packages)
 
     def assert_rejected(self, pattern, **kwargs):
         with self.assertRaisesRegex(RuntimeError, pattern):
             self.verify(**kwargs)
         self.assertFalse([c for c in self.data["calls"] if c[0] != "GET"])
 
-    def test_default_commit_is_the_current_main_head(self):
-        self.assertEqual(self.verify(), {"sha": MAIN, "tag": "v1.2.3"})
+    def test_the_current_main_head_is_accepted(self):
+        self.verify()
 
-    def test_older_main_commit_can_be_selected(self):
-        self.assertEqual(self.verify(inputs(commit=OLDER))["sha"], OLDER)
-
-    def test_metadata_is_read_from_the_selected_commit(self):
+    def test_metadata_is_read_from_the_release_commit(self):
         seen = []
-        release.verify(self.api, REPO, inputs(commit=OLDER), RUN, "refs/heads/main",
+        release.verify(self.api, REPO, "1.2.3", MAIN, RUN, "refs/heads/main",
                        lambda sha: seen.append(sha) or SERVICE)
-        self.assertEqual(seen, [OLDER])
+        self.assertEqual(seen, [MAIN])
 
     def test_version_mismatch_fails_before_any_write(self):
-        self.assert_rejected("does not match the service package version", values=inputs("9.9.9"))
+        self.assert_rejected("does not match the service package version", version="9.9.9")
 
     def test_internal_crate_versions_are_ignored(self):
         packages = metadata(("my-service", "2.0.0", ("bin",)), ("environment", "0.1.0", ("lib",)))
-        self.assertEqual(self.verify(inputs("2.0.0"), packages=packages)["tag"], "v2.0.0")
+        self.verify("2.0.0", packages=packages)
 
     def test_invalid_versions_are_rejected(self):
         for version in ("1.2", "v1.2.3", "01.2.3", "1.2.3-rc.1", "1.2.3 ", "", "1.2.3\n"):
             with self.subTest(version=version):
-                self.assert_rejected("Version must be", values=inputs(version))
+                self.assert_rejected("Version must be", version=version)
 
     def test_invalid_commit_is_rejected(self):
-        for commit in ("main", "A" * 40, "a" * 39, "a" * 40 + "\n"):
-            with self.subTest(commit=commit):
-                self.assert_rejected("Commit must be", values=inputs(commit=commit))
+        for sha in ("main", "A" * 40, "a" * 39, "a" * 40 + "\n"):
+            with self.subTest(sha=sha):
+                self.assert_rejected("Commit must be", sha=sha)
 
-    def test_commit_outside_main_is_rejected(self):
-        # compare/{commit}...main: "behind" means the commit is newer than main.
-        for status in ("diverged", "behind"):
-            with self.subTest(status=status):
-                self.data["compare"]["c" * 40] = status
-                self.assert_rejected("not on main", values=inputs(commit="c" * 40))
+    def test_a_commit_main_has_moved_past_is_rejected(self):
+        # GITHUB_TOKEN cannot release a commit that differs from main in workflow files.
+        self.assert_rejected("main has moved", sha=OLDER)
 
     def test_only_the_main_branch_can_release(self):
         self.assert_rejected("Run the release workflow from main", ref="refs/heads/feature")
@@ -166,23 +158,21 @@ class VerifyTest(unittest.TestCase):
             check("a"), check("b", conclusion="neutral"), check("c", conclusion="skipped"),
             check("d", conclusion="cancelled"),
         ]
-        self.assertEqual(self.verify()["sha"], MAIN)
+        self.verify()
 
     def test_this_runs_own_checks_are_ignored(self):
         self.data["check_runs"][MAIN] = [
             check("verify", status="in_progress", conclusion=None, suite=self.data["suite"]),
         ]
-        self.assertEqual(self.verify()["sha"], MAIN)
+        self.verify()
 
     def runs_on_main(self, *suites):
-        self.data["workflow_runs"][MAIN] = [
-            {"check_suite_id": suite, "event": event, "head_sha": MAIN} for suite, event in suites
-        ]
+        self.data["workflow_runs"][MAIN] = [workflow_run(suite, event) for suite, event in suites]
 
     def test_earlier_release_runs_checks_are_ignored(self):
         self.runs_on_main((5, "workflow_dispatch"))
         self.data["check_runs"][MAIN] = [check("Verify release", conclusion="failure", suite=5)]
-        self.assertEqual(self.verify()["sha"], MAIN)
+        self.verify()
 
     def test_failed_pr_commands_do_not_block_a_commit_that_passed_validation(self):
         # The shape of real commit 05e99b4: the worker reports on the main head, whatever it tests.
@@ -193,7 +183,7 @@ class VerifyTest(unittest.TestCase):
             check("Run PR command", conclusion="failure", suite=6),
             check("Run PR command", conclusion="failure", suite=8),
         ]
-        self.assertEqual(self.verify()["sha"], MAIN)
+        self.verify()
 
     def test_runs_that_only_report_on_the_main_head_are_ignored(self):
         for event in ("workflow_dispatch", "issue_comment", "dynamic", "schedule"):
@@ -202,12 +192,12 @@ class VerifyTest(unittest.TestCase):
                 with self.subTest(event=event, status=run["status"]):
                     self.runs_on_main((5, event))
                     self.data["check_runs"][MAIN] = [run]
-                    self.assertEqual(self.verify()["sha"], MAIN)
+                    self.verify()
 
     def test_runs_on_later_pages_are_read(self):
         self.runs_on_main(*[(n, "push") for n in range(100, 200)], (5, "issue_comment"))
         self.data["check_runs"][MAIN] = [check("unrelated", conclusion="failure", suite=5)]
-        self.assertEqual(self.verify()["sha"], MAIN)
+        self.verify()
 
     def test_push_and_pull_request_runs_still_count(self):
         for event in ("push", "pull_request"):
@@ -223,11 +213,29 @@ class VerifyTest(unittest.TestCase):
         self.data["check_runs"][MAIN] = [check("External scan", conclusion="failure", suite=6)]
         self.assert_rejected("External scan")
 
-    def test_unrelated_runs_of_another_commit_are_not_applied(self):
-        # Selecting an older commit reads that commit's runs, not the main head's.
-        self.runs_on_main((5, "issue_comment"))
-        self.data["check_runs"][OLDER] = [check("Source and generated variants", conclusion="failure", suite=5)]
-        self.assert_rejected("Source and generated variants", values=inputs(commit=OLDER))
+    def test_commit_runs_with_no_check_runs_still_count(self):
+        # A run that fails to start, or has not created its first job, has no check runs.
+        for event in ("push", "pull_request"):
+            for status, conclusion in (("completed", "startup_failure"), ("completed", "failure"),
+                                       ("queued", None), ("in_progress", None)):
+                with self.subTest(event=event, status=status, conclusion=conclusion):
+                    self.data["workflow_runs"][MAIN] = [
+                        workflow_run(5, event, status, conclusion, "Template validation"),
+                    ]
+                    self.assert_rejected("Template validation")
+
+    def test_commit_runs_that_pass_or_were_cancelled_are_accepted(self):
+        for conclusion in ("success", "neutral", "skipped", "cancelled"):
+            with self.subTest(conclusion=conclusion):
+                self.data["workflow_runs"][MAIN] = [workflow_run(5, "push", "completed", conclusion)]
+                self.verify()
+
+    def test_other_runs_with_no_check_runs_are_ignored(self):
+        self.data["workflow_runs"][MAIN] = [
+            workflow_run(5, "workflow_dispatch", "in_progress", None),
+            workflow_run(6, "issue_comment", "completed", "failure"),
+        ]
+        self.verify()
 
     def test_checks_on_later_pages_are_read(self):
         self.data["check_runs"][MAIN] = [check(f"ok-{n}") for n in range(100)] + [
@@ -241,6 +249,20 @@ class VerifyTest(unittest.TestCase):
                 self.data["statuses"][MAIN] = [{"context": "e2e", "state": state}]
                 self.assert_rejected("e2e")
 
+    def test_command_bookkeeping_statuses_are_ignored(self):
+        # The command ledger writes these to the root commit, which can be a new service's first release.
+        for state in ("failure", "error", "pending"):
+            with self.subTest(state=state):
+                self.data["statuses"][MAIN] = [{"context": "ci-command-state/10/abc", "state": state}]
+                self.verify()
+
+    def test_failed_command_statuses_still_block(self):
+        self.data["statuses"][MAIN] = [
+            {"context": "ci-command-state/10/abc", "state": "failure"},
+            {"context": "ci-command /test", "state": "error"},
+        ]
+        self.assert_rejected("ci-command /test")
+
     def test_statuses_on_later_pages_are_read(self):
         self.data["statuses"][MAIN] = [{"context": f"ok-{n}", "state": "success"} for n in range(100)] + [
             {"context": "late", "state": "failure"},
@@ -249,7 +271,7 @@ class VerifyTest(unittest.TestCase):
 
     def test_successful_statuses_and_no_checks_are_accepted(self):
         self.data["statuses"][MAIN] = [{"context": "e2e", "state": "success"}]
-        self.assertEqual(self.verify()["sha"], MAIN)
+        self.verify()
 
 
 class PublishTest(unittest.TestCase):
@@ -257,28 +279,34 @@ class PublishTest(unittest.TestCase):
         self.data, self.api = fixture()
 
     def test_creates_the_tag_and_release_on_the_verified_commit(self):
-        release.publish(self.api, REPO, "1.2.3", OLDER)
+        release.publish(self.api, REPO, "1.2.3", MAIN)
         posts = [c for c in self.data["calls"] if c[0] == "POST"]
         self.assertEqual(posts, [("POST", f"repos/{REPO}/releases", {
-            "tag_name": "v1.2.3", "target_commitish": OLDER, "name": "v1.2.3",
+            "tag_name": "v1.2.3", "target_commitish": MAIN, "name": "v1.2.3",
             "generate_release_notes": True,
         })])
-        self.assertEqual(self.data["tags"]["v1.2.3"], OLDER)
+        self.assertEqual(self.data["tags"]["v1.2.3"], MAIN)
 
     def test_tag_created_after_verification_blocks_publication(self):
-        self.data["tags"]["v1.2.3"] = MAIN
+        self.data["tags"]["v1.2.3"] = OLDER
         with self.assertRaisesRegex(RuntimeError, "Tag v1.2.3 already exists"):
-            release.publish(self.api, REPO, "1.2.3", OLDER)
+            release.publish(self.api, REPO, "1.2.3", MAIN)
+        self.assertFalse([c for c in self.data["calls"] if c[0] == "POST"])
+
+    def test_main_moving_after_verification_blocks_publication(self):
+        self.data["main"] = OLDER
+        with self.assertRaisesRegex(RuntimeError, "main has moved"):
+            release.publish(self.api, REPO, "1.2.3", MAIN)
         self.assertFalse([c for c in self.data["calls"] if c[0] == "POST"])
 
     def test_tag_on_another_commit_after_publication_is_reported(self):
-        self.data["release_tag_sha"] = MAIN
+        self.data["release_tag_sha"] = OLDER
         with self.assertRaisesRegex(RuntimeError, "does not point to the verified commit"):
-            release.publish(self.api, REPO, "1.2.3", OLDER)
+            release.publish(self.api, REPO, "1.2.3", MAIN)
 
     def test_publish_revalidates_its_inputs(self):
         with self.assertRaisesRegex(RuntimeError, "Version must be"):
-            release.publish(self.api, REPO, "1.2", OLDER)
+            release.publish(self.api, REPO, "1.2", MAIN)
         with self.assertRaisesRegex(RuntimeError, "Commit must be"):
             release.publish(self.api, REPO, "1.2.3", "main")
         self.assertFalse(self.data["calls"])

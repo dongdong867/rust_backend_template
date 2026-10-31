@@ -111,7 +111,7 @@ See [command security and hosted validation](ci-commands.md) before changing the
 
 ## Release
 
-A hand-started `release.yml` run on `main` verifies a commit, then creates its `vX.Y.Z` tag and GitHub Release.
+A hand-started `release.yml` run on `main` verifies the current `main` head, then creates its `vX.Y.Z` tag and GitHub Release.
 The service package is the only workspace package with a binary target; only its version must match the tag.
-Verification has a read-only token. It runs the trusted `.github/ci/release.py` from the workflow commit and checks out the release commit separately.
+Verification has a read-only token. A release is always the commit the run started on, so one checkout holds both `.github/ci/release.py` and the release commit. `GITHUB_TOKEN` cannot release a commit that differs from `main` in workflow files, so a run stops if `main` has moved.
 Only the publish job has `contents: write`, and it skips dry runs.

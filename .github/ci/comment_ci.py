@@ -90,7 +90,7 @@ def status_context(command):
 
 
 def state_context(pr, command):
-    return f"ci-command-state/{pr}/{command_key(command)}"
+    return f"{github_client.COMMAND_STATE_PREFIX}{pr}/{command_key(command)}"
 
 
 def run_title(request):
