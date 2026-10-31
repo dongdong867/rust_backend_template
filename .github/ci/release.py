@@ -40,16 +40,6 @@ def github_api(method, path, body=None):
     return github_client.request(method, path, body, expected_error)
 
 
-def pages(api, path, key):
-    page = 1
-    while True:
-        items = api("GET", f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")[key]
-        yield from items
-        if len(items) < 100:
-            break
-        page += 1
-
-
 def tag_commit(api, repo, tag):
     ref = api("GET", f"repos/{repo}/git/ref/tags/{quote(tag, safe='')}")
     return None if ref is None else ref["object"]["sha"]
@@ -90,8 +80,9 @@ def release_suites(api, repo, sha, run_id):
     block every later release of that commit.
     """
     run = api("GET", f"repos/{repo}/actions/runs/{run_id}")
-    runs = pages(api, f"repos/{repo}/actions/workflows/{run['workflow_id']}/runs?head_sha={sha}",
-                 "workflow_runs")
+    runs = github_client.pages(
+        api, f"repos/{repo}/actions/workflows/{run['workflow_id']}/runs?head_sha={sha}", "workflow_runs"
+    )
     return {run["check_suite_id"]} | {other["check_suite_id"] for other in runs}
 
 
@@ -99,12 +90,12 @@ def require_passing_checks(api, repo, sha, run_id):
     """Every existing check and status on the commit must pass, except release runs' own jobs."""
     ignored = release_suites(api, repo, sha, run_id)
     failing = []
-    for run in pages(api, f"repos/{repo}/commits/{sha}/check-runs", "check_runs"):
+    for run in github_client.pages(api, f"repos/{repo}/commits/{sha}/check-runs", "check_runs"):
         if run["check_suite"]["id"] in ignored:
             continue
         if run["status"] != "completed" or run["conclusion"] not in PASSING:
             failing.append(run["name"])
-    for status in pages(api, f"repos/{repo}/commits/{sha}/status", "statuses"):
+    for status in github_client.pages(api, f"repos/{repo}/commits/{sha}/status", "statuses"):
         if status["state"] != "success":
             failing.append(status["context"])
     if failing:

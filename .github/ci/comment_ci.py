@@ -127,18 +127,6 @@ def github_api(method, path, body=None):
     return github_client.request(method, path, body, expected_error)
 
 
-def pages(api, path, key=None):
-    page = 1
-    while True:
-        separator = "&" if "?" in path else "?"
-        response = api("GET", f"{path}{separator}per_page=100&page={page}")
-        items = response[key] if key else response
-        yield from items
-        if len(items) < 100:
-            break
-        page += 1
-
-
 def authorized(api, repo, login):
     if not isinstance(login, str) or not login:
         return False
@@ -248,7 +236,7 @@ def outcome_code(state, reason):
 
 def state_records(api, repo, anchor, pr, command):
     context = state_context(pr, command)
-    for status in pages(api, f"repos/{repo}/commits/{anchor}/statuses"):
+    for status in github_client.pages(api, f"repos/{repo}/commits/{anchor}/statuses"):
         if status["context"] != context:
             continue
         try:
@@ -408,7 +396,7 @@ def check_worker(api, repo, anchor, inputs, run_id):
 def timed_out(api, repo, run_id):
     """Actions may report a job timeout as cancelled or failed; its duration tells them apart."""
     try:
-        jobs = pages(api, f"repos/{repo}/actions/runs/{run_id}/attempts/1/jobs", "jobs")
+        jobs = github_client.pages(api, f"repos/{repo}/actions/runs/{run_id}/attempts/1/jobs", "jobs")
         job = next((job for job in jobs if job.get("name") == EXECUTE_JOB), None)
         if job is None:
             return False
@@ -443,7 +431,7 @@ def outcome(api, repo, request, run_id, results):
 
 
 def owns_pending_head(api, repo, request, run_id):
-    for status in pages(api, f"repos/{repo}/commits/{request['sha']}/statuses"):
+    for status in github_client.pages(api, f"repos/{repo}/commits/{request['sha']}/statuses"):
         if status["context"] == status_context(request["command"]):
             return (
                 actions_status(status) and status["state"] == "pending"

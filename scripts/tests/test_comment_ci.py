@@ -776,6 +776,36 @@ class CommentCiTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
                     self.ci.github_api("GET", f"repos/{REPO}/actions/runs/100/attempts/1/jobs")
 
+    def api_error(self, code, method, path):
+        from urllib.error import HTTPError
+        with patch.dict("os.environ", {"GH_TOKEN": "private-token"}):
+            with patch.object(self.ci.github_client, "urlopen", side_effect=HTTPError(
+                "https://api.github.com", code, "private response", {}, None
+            )):
+                return self.ci.github_api(method, path, {} if method == "POST" else None)
+
+    def test_missing_collaborator_or_comment_reads_as_empty(self):
+        for path in (f"repos/{REPO}/collaborators/alice/permission", f"repos/{REPO}/issues/comments/10"):
+            with self.subTest(path=path):
+                self.assertEqual(self.api_error(404, "GET", path), {})
+
+    def test_cancelling_a_finished_run_is_tolerated(self):
+        self.assertIsNone(self.api_error(409, "POST", f"repos/{REPO}/actions/runs/100/cancel"))
+
+    def test_other_errors_on_the_tolerated_paths_raise(self):
+        for code, method, path in (
+            (403, "GET", f"repos/{REPO}/collaborators/alice/permission"),
+            (403, "GET", f"repos/{REPO}/issues/comments/10"),
+            (404, "POST", f"repos/{REPO}/issues/comments/10"),
+            (404, "POST", f"repos/{REPO}/actions/runs/100/cancel"),
+            (409, "POST", f"repos/{REPO}/statuses/{ANCHOR}"),
+            (409, "GET", f"repos/{REPO}/actions/runs/100/cancel"),
+        ):
+            with self.subTest(code=code, method=method, path=path):
+                with self.assertRaisesRegex(RuntimeError, f"HTTP {code}") as raised:
+                    self.api_error(code, method, path)
+                self.assertNotIn("private", str(raised.exception))
+
     def test_execution_calls_only_the_approved_make_targets(self):
         with patch.object(self.ci.subprocess, "run") as run:
             self.ci.execute("lint")

@@ -42,3 +42,16 @@ def request(method, path, body=None, tolerate=None):
         raise RuntimeError(f"GitHub API request failed (HTTP {error.code}).") from None
     except (URLError, OSError, ValueError):
         raise RuntimeError("GitHub API request failed.") from None
+
+
+def pages(api, path, key=None):
+    """Yield every item of a paged GET; `key` names the list when the response is an object."""
+    page = 1
+    while True:
+        separator = "&" if "?" in path else "?"
+        response = api("GET", f"{path}{separator}per_page=100&page={page}")
+        items = response[key] if key else response
+        yield from items
+        if len(items) < 100:
+            break
+        page += 1
