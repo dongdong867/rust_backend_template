@@ -64,11 +64,7 @@ class TemplateChecksTest(unittest.TestCase):
             "generated/tests/postgres_database.rs",
         ):
             self.write(self.output, path)
-        for path in (
-            ".github/workflows/format.yml", ".github/dependabot.yml",
-            ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
-            ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
-        ):
+        for path in template_test.SHARED_CI_FILES:
             self.write(self.output, path, (template_test.ROOT / path).read_text())
         self.write(self.output, "Makefile", "test:\n\tcargo test --locked\ntest-crate:\n\tpython3 helper\n")
         self.write(self.output, ".example.env", "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n")

@@ -4,11 +4,14 @@ import importlib.util
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# The scripts import their shared request helper from their own folder.
+sys.path.insert(0, str(ROOT / ".github/ci"))
 SPEC = importlib.util.spec_from_file_location("template_test", ROOT / "scripts/template_test.py")
 template_test = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(template_test)
@@ -165,6 +168,48 @@ class CiPolicyTest(unittest.TestCase):
                           "secrets.", "pull-requests: write"):
             self.assertNotIn(forbidden, report)
 
+    def test_release_runs_only_by_hand_and_writes_only_after_verification(self):
+        text = self.workflow("release.yml")
+        self.assertEqual(text.split("\non:\n", 1)[1].split("\n")[0], "  workflow_dispatch:")
+        self.assertNotRegex(text, r"(?m)^  (push|pull_request|schedule|workflow_run|release):")
+        self.assertIn("      dry_run:\n", text)
+        self.assertRegex(text, r"dry_run:\n(        .*\n)*?        default: true\n")
+        self.assertIn("permissions: {}", text)
+        self.assertIn("cancel-in-progress: false", text)
+        self.assertNotIn("secrets.", text)
+        self.assertNotIn("continue-on-error", text)
+        self.assertNotIn("actions/cache", text)
+        for action in re.findall(r"^\s+(?:- )?uses: ([^\s]+)", text, re.M):
+            self.assertRegex(action, r"^[\w./-]+@[a-f0-9]{40}$")
+        # Inputs reach scripts only through env, never shell text.
+        for line in re.findall(r"^\s+run: .*$", text, re.M):
+            self.assertNotIn("${{", line)
+        sections = jobs(text)
+        self.assertEqual(sorted(sections), ["publish", "verify"])
+        verify, publish = sections["verify"], sections["publish"]
+        self.assertEqual(re.findall(r"^      ([\w-]+): (read|write)$", verify, re.M), [
+            ("contents", "read"), ("actions", "read"), ("checks", "read"), ("statuses", "read"),
+        ])
+        self.assertEqual(re.findall(r"^      ([\w-]+): (read|write)$", publish, re.M), [
+            ("contents", "write"),
+        ])
+        self.assertIn("needs: verify", publish)
+        self.assertIn("if: ${{ !inputs.dry_run }}", publish)
+        self.assertIn("release.py publish", publish)
+        self.assertNotIn("make ", publish)
+        # A release is always the commit the run started on, so no input can choose another.
+        self.assertNotIn("inputs.commit", text)
+        self.assertNotIn("      commit:\n", text)
+        for section in (verify, publish):
+            self.assertEqual(section.count("actions/checkout@"), 1)
+            self.assertIn("ref: ${{ github.sha }}", section)
+        self.assertLess(verify.index("release.py verify"), verify.index("make lint"))
+        for target in ("make lint", "make test FEATURES=\n", "make test FEATURES=api-doc"):
+            self.assertIn(target, verify)
+        for section in (verify, publish):
+            self.assertIn("persist-credentials: false", section)
+            self.assertRegex(section, r"timeout-minutes: \d+")
+
     def test_only_source_workflow_is_excluded_from_generation(self):
         excluded = (ROOT / ".genignore").read_text().splitlines()
         self.assertIn("/.github/workflows/template-ci.yml", excluded)
@@ -246,6 +291,7 @@ class GeneratedCiTest(unittest.TestCase):
             ".github/workflows/format.yml", ".github/dependabot.yml",
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
+            ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
         )
         for name in self.files:
             for root in (self.source, self.project):
@@ -264,6 +310,7 @@ class GeneratedCiTest(unittest.TestCase):
         for name in (
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
+            ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
         ):
             self.assertTrue((ROOT / name).is_file(), f"Missing shared command support: {name}")
         for name in (

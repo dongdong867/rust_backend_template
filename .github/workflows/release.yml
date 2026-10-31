@@ -1,0 +1,79 @@
+name: Release
+run-name: release v${{ inputs.version }}${{ inputs.dry_run && ' (dry run)' || '' }}
+
+# Only a maintainer's explicit run releases; pushes and merges never tag.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Service package version to release, X.Y.Z
+        required: true
+        type: string
+      dry_run:
+        description: Run every check without creating the tag or release
+        required: false
+        default: true
+        type: boolean
+
+permissions: {}
+
+# One release at a time; a running release is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned Rust from the release toolchain
+        run: rustup show active-toolchain
+      - name: Check version, tag and existing checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: python3 .github/ci/release.py verify
+      - name: Read tool pins
+        id: tools
+        run: make --no-print-directory tool-versions >> "$GITHUB_OUTPUT"
+      - name: Install prebuilt Taplo
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: taplo@${{ steps.tools.outputs.taplo }}
+          fallback: none
+      - name: Lint
+        run: make lint
+      - name: Default fast tests
+        run: make test FEATURES=
+      - name: API documentation fast tests
+        run: make test FEATURES=api-doc
+
+  publish:
+    name: Create tag and release
+    needs: verify
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Create the verified tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: python3 .github/ci/release.py publish

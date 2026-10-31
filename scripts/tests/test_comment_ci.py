@@ -5,11 +5,14 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# The scripts import their shared request helper from their own folder.
+sys.path.insert(0, str(ROOT / ".github/ci"))
 SCRIPT = ROOT / ".github/ci/comment_ci.py"
 REPO = "owner/service"
 ANCHOR = "a" * 40
@@ -754,7 +757,7 @@ class CommentCiTest(unittest.TestCase):
         with patch.dict("os.environ", {
             "GH_TOKEN": "private-token", "GITHUB_GRAPHQL_URL": "https://github.example/api/graphql",
         }):
-            with patch.object(self.ci, "urlopen", side_effect=HTTPError(
+            with patch.object(self.ci.github_client, "urlopen", side_effect=HTTPError(
                 "https://github.example", 403, "private response", {}, None
             )) as opened:
                 with self.assertRaisesRegex(RuntimeError, "HTTP 403") as raised:
@@ -766,12 +769,42 @@ class CommentCiTest(unittest.TestCase):
     def test_exact_missing_run_api_response_is_optional_but_other_errors_fail(self):
         from urllib.error import HTTPError
         with patch.dict("os.environ", {"GH_TOKEN": "private-token"}):
-            with patch.object(self.ci, "urlopen", side_effect=HTTPError(
+            with patch.object(self.ci.github_client, "urlopen", side_effect=HTTPError(
                 "https://api.github.com", 404, "missing", {}, None
             )):
                 self.assertIsNone(self.ci.github_api("GET", f"repos/{REPO}/actions/runs/100"))
                 with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
                     self.ci.github_api("GET", f"repos/{REPO}/actions/runs/100/attempts/1/jobs")
+
+    def api_error(self, code, method, path):
+        from urllib.error import HTTPError
+        with patch.dict("os.environ", {"GH_TOKEN": "private-token"}):
+            with patch.object(self.ci.github_client, "urlopen", side_effect=HTTPError(
+                "https://api.github.com", code, "private response", {}, None
+            )):
+                return self.ci.github_api(method, path, {} if method == "POST" else None)
+
+    def test_missing_collaborator_or_comment_reads_as_empty(self):
+        for path in (f"repos/{REPO}/collaborators/alice/permission", f"repos/{REPO}/issues/comments/10"):
+            with self.subTest(path=path):
+                self.assertEqual(self.api_error(404, "GET", path), {})
+
+    def test_cancelling_a_finished_run_is_tolerated(self):
+        self.assertIsNone(self.api_error(409, "POST", f"repos/{REPO}/actions/runs/100/cancel"))
+
+    def test_other_errors_on_the_tolerated_paths_raise(self):
+        for code, method, path in (
+            (403, "GET", f"repos/{REPO}/collaborators/alice/permission"),
+            (403, "GET", f"repos/{REPO}/issues/comments/10"),
+            (404, "POST", f"repos/{REPO}/issues/comments/10"),
+            (404, "POST", f"repos/{REPO}/actions/runs/100/cancel"),
+            (409, "POST", f"repos/{REPO}/statuses/{ANCHOR}"),
+            (409, "GET", f"repos/{REPO}/actions/runs/100/cancel"),
+        ):
+            with self.subTest(code=code, method=method, path=path):
+                with self.assertRaisesRegex(RuntimeError, f"HTTP {code}") as raised:
+                    self.api_error(code, method, path)
+                self.assertNotIn("private", str(raised.exception))
 
     def test_execution_calls_only_the_approved_make_targets(self):
         with patch.object(self.ci.subprocess, "run") as run:

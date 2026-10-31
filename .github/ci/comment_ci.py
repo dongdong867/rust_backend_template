@@ -10,9 +10,9 @@ import re
 import subprocess
 import sys
 import time
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+
+import github_client
 
 
 WORKFLOW = "ci-command-worker.yml"
@@ -90,7 +90,7 @@ def status_context(command):
 
 
 def state_context(pr, command):
-    return f"ci-command-state/{pr}/{command_key(command)}"
+    return f"{github_client.COMMAND_STATE_PREFIX}{pr}/{command_key(command)}"
 
 
 def run_title(request):
@@ -107,53 +107,24 @@ def parse_title(title):
         return None
 
 
+def expected_error(code, method, path):
+    # A missing collaborator/comment is not authorization.
+    if code == 404 and method == "GET" and (
+        "/collaborators/" in path or "/issues/comments/" in path
+    ):
+        return True, {}
+    if code == 404 and method == "GET" and re.fullmatch(
+        r"repos/[^/]+/[^/]+/actions/runs/[1-9][0-9]*", path
+    ):
+        return True, None
+    if code == 409 and method == "POST" and path.endswith("/cancel"):
+        # A bound run may have completed between reading its state and cancelling it.
+        return True, None
+    return False, None
+
+
 def github_api(method, path, body=None):
-    token = os.environ.get("GH_TOKEN", "")
-    if not token:
-        raise RuntimeError("The GitHub job token is required.")
-    base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
-    url = (os.environ.get("GITHUB_GRAPHQL_URL", "https://api.github.com/graphql")
-           if path == "graphql" else f"{base}/{path}")
-    request = Request(
-        url, method=method,
-        data=json.dumps(body).encode() if body is not None else None,
-        headers={
-            "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json", "X-GitHub-Api-Version": "2026-03-10",
-        },
-    )
-    try:
-        with urlopen(request, timeout=30) as response:
-            content = response.read()
-            return json.loads(content) if content else None
-    except HTTPError as error:
-        # A missing collaborator/comment is not authorization. Never echo API error bodies.
-        if error.code == 404 and method == "GET" and (
-            "/collaborators/" in path or "/issues/comments/" in path
-        ):
-            return {}
-        if error.code == 404 and method == "GET" and re.fullmatch(
-            r"repos/[^/]+/[^/]+/actions/runs/[1-9][0-9]*", path
-        ):
-            return None
-        if error.code == 409 and method == "POST" and path.endswith("/cancel"):
-            # A bound run may have completed between reading its state and cancelling it.
-            return None
-        raise RuntimeError(f"GitHub API request failed (HTTP {error.code}).") from None
-    except (URLError, OSError, ValueError):
-        raise RuntimeError("GitHub API request failed.") from None
-
-
-def pages(api, path, key=None):
-    page = 1
-    while True:
-        separator = "&" if "?" in path else "?"
-        response = api("GET", f"{path}{separator}per_page=100&page={page}")
-        items = response[key] if key else response
-        yield from items
-        if len(items) < 100:
-            break
-        page += 1
+    return github_client.request(method, path, body, expected_error)
 
 
 def authorized(api, repo, login):
@@ -265,7 +236,7 @@ def outcome_code(state, reason):
 
 def state_records(api, repo, anchor, pr, command):
     context = state_context(pr, command)
-    for status in pages(api, f"repos/{repo}/commits/{anchor}/statuses"):
+    for status in github_client.pages(api, f"repos/{repo}/commits/{anchor}/statuses"):
         if status["context"] != context:
             continue
         try:
@@ -425,7 +396,7 @@ def check_worker(api, repo, anchor, inputs, run_id):
 def timed_out(api, repo, run_id):
     """Actions may report a job timeout as cancelled or failed; its duration tells them apart."""
     try:
-        jobs = pages(api, f"repos/{repo}/actions/runs/{run_id}/attempts/1/jobs", "jobs")
+        jobs = github_client.pages(api, f"repos/{repo}/actions/runs/{run_id}/attempts/1/jobs", "jobs")
         job = next((job for job in jobs if job.get("name") == EXECUTE_JOB), None)
         if job is None:
             return False
@@ -460,7 +431,7 @@ def outcome(api, repo, request, run_id, results):
 
 
 def owns_pending_head(api, repo, request, run_id):
-    for status in pages(api, f"repos/{repo}/commits/{request['sha']}/statuses"):
+    for status in github_client.pages(api, f"repos/{repo}/commits/{request['sha']}/statuses"):
         if status["context"] == status_context(request["command"]):
             return (
                 actions_status(status) and status["state"] == "pending"
