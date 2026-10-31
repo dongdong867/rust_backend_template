@@ -4,11 +4,14 @@ import importlib.util
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# The scripts import their shared request helper from their own folder.
+sys.path.insert(0, str(ROOT / ".github/ci"))
 SPEC = importlib.util.spec_from_file_location("template_test", ROOT / "scripts/template_test.py")
 template_test = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(template_test)
@@ -287,7 +290,7 @@ class GeneratedCiTest(unittest.TestCase):
             ".github/workflows/format.yml", ".github/dependabot.yml",
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
-            ".github/workflows/release.yml", ".github/ci/release.py",
+            ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
         )
         for name in self.files:
             for root in (self.source, self.project):
@@ -306,7 +309,7 @@ class GeneratedCiTest(unittest.TestCase):
         for name in (
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
-            ".github/workflows/release.yml", ".github/ci/release.py",
+            ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
         ):
             self.assertTrue((ROOT / name).is_file(), f"Missing shared command support: {name}")
         for name in (

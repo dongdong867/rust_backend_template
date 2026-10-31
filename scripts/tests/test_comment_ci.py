@@ -5,11 +5,14 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# The scripts import their shared request helper from their own folder.
+sys.path.insert(0, str(ROOT / ".github/ci"))
 SCRIPT = ROOT / ".github/ci/comment_ci.py"
 REPO = "owner/service"
 ANCHOR = "a" * 40
@@ -754,7 +757,7 @@ class CommentCiTest(unittest.TestCase):
         with patch.dict("os.environ", {
             "GH_TOKEN": "private-token", "GITHUB_GRAPHQL_URL": "https://github.example/api/graphql",
         }):
-            with patch.object(self.ci, "urlopen", side_effect=HTTPError(
+            with patch.object(self.ci.github_client, "urlopen", side_effect=HTTPError(
                 "https://github.example", 403, "private response", {}, None
             )) as opened:
                 with self.assertRaisesRegex(RuntimeError, "HTTP 403") as raised:
@@ -766,7 +769,7 @@ class CommentCiTest(unittest.TestCase):
     def test_exact_missing_run_api_response_is_optional_but_other_errors_fail(self):
         from urllib.error import HTTPError
         with patch.dict("os.environ", {"GH_TOKEN": "private-token"}):
-            with patch.object(self.ci, "urlopen", side_effect=HTTPError(
+            with patch.object(self.ci.github_client, "urlopen", side_effect=HTTPError(
                 "https://api.github.com", 404, "missing", {}, None
             )):
                 self.assertIsNone(self.ci.github_api("GET", f"repos/{REPO}/actions/runs/100"))

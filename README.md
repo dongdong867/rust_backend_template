@@ -210,6 +210,7 @@ gh workflow run release.yml -f version=1.2.3
 Run it again with `-f dry_run=false` to create the `v1.2.3` tag and a GitHub Release with generated notes.
 
 The run fails before any tag exists when the version is not `X.Y.Z`, the commit is not on `main`, the service package version differs, the tag already exists, or any existing check or status on the commit failed or is still running.
+A check cancelled by a newer push does not block, and neither do earlier release runs' own checks.
 It then runs `make lint` and `make test` with default features and `api-doc` on the commit.
 Only the final job, which runs after every check passes, has permission to write.
 Anyone with write access can run the workflow, so it adds no approval beyond repository permissions.

@@ -10,9 +10,9 @@ import re
 import subprocess
 import sys
 import time
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+
+import github_client
 
 
 WORKFLOW = "ci-command-worker.yml"
@@ -107,41 +107,24 @@ def parse_title(title):
         return None
 
 
+def expected_error(code, method, path):
+    # A missing collaborator/comment is not authorization.
+    if code == 404 and method == "GET" and (
+        "/collaborators/" in path or "/issues/comments/" in path
+    ):
+        return True, {}
+    if code == 404 and method == "GET" and re.fullmatch(
+        r"repos/[^/]+/[^/]+/actions/runs/[1-9][0-9]*", path
+    ):
+        return True, None
+    if code == 409 and method == "POST" and path.endswith("/cancel"):
+        # A bound run may have completed between reading its state and cancelling it.
+        return True, None
+    return False, None
+
+
 def github_api(method, path, body=None):
-    token = os.environ.get("GH_TOKEN", "")
-    if not token:
-        raise RuntimeError("The GitHub job token is required.")
-    base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
-    url = (os.environ.get("GITHUB_GRAPHQL_URL", "https://api.github.com/graphql")
-           if path == "graphql" else f"{base}/{path}")
-    request = Request(
-        url, method=method,
-        data=json.dumps(body).encode() if body is not None else None,
-        headers={
-            "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json", "X-GitHub-Api-Version": "2026-03-10",
-        },
-    )
-    try:
-        with urlopen(request, timeout=30) as response:
-            content = response.read()
-            return json.loads(content) if content else None
-    except HTTPError as error:
-        # A missing collaborator/comment is not authorization. Never echo API error bodies.
-        if error.code == 404 and method == "GET" and (
-            "/collaborators/" in path or "/issues/comments/" in path
-        ):
-            return {}
-        if error.code == 404 and method == "GET" and re.fullmatch(
-            r"repos/[^/]+/[^/]+/actions/runs/[1-9][0-9]*", path
-        ):
-            return None
-        if error.code == 409 and method == "POST" and path.endswith("/cancel"):
-            # A bound run may have completed between reading its state and cancelling it.
-            return None
-        raise RuntimeError(f"GitHub API request failed (HTTP {error.code}).") from None
-    except (URLError, OSError, ValueError):
-        raise RuntimeError("GitHub API request failed.") from None
+    return github_client.request(method, path, body, expected_error)
 
 
 def pages(api, path, key=None):

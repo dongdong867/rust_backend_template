@@ -7,12 +7,13 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+
+import github_client
 
 
-PASSING = ("success", "neutral", "skipped")
+# A newer push cancels main validation; this run lints and tests the commit itself.
+PASSING = ("success", "neutral", "skipped", "cancelled")
 
 
 def parse_version(value):
@@ -28,30 +29,25 @@ def parse_sha(value):
     return value
 
 
+def expected_error(code, method, path):
+    # A missing tag reference is the expected answer before publication.
+    if code == 404 and method == "GET" and "/git/ref/tags/" in path:
+        return True, None
+    return False, None
+
+
 def github_api(method, path, body=None):
-    token = os.environ.get("GH_TOKEN", "")
-    if not token:
-        raise RuntimeError("The GitHub job token is required.")
-    base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
-    request = Request(
-        f"{base}/{path}", method=method,
-        data=json.dumps(body).encode() if body is not None else None,
-        headers={
-            "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json", "X-GitHub-Api-Version": "2026-03-10",
-        },
-    )
-    try:
-        with urlopen(request, timeout=30) as response:
-            content = response.read()
-            return json.loads(content) if content else None
-    except HTTPError as error:
-        # A missing tag reference is the expected answer before publication.
-        if error.code == 404 and method == "GET" and "/git/ref/tags/" in path:
-            return None
-        raise RuntimeError(f"GitHub API request failed (HTTP {error.code}).") from None
-    except (URLError, OSError, ValueError):
-        raise RuntimeError("GitHub API request failed.") from None
+    return github_client.request(method, path, body, expected_error)
+
+
+def pages(api, path, key):
+    page = 1
+    while True:
+        items = api("GET", f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")[key]
+        yield from items
+        if len(items) < 100:
+            break
+        page += 1
 
 
 def tag_commit(api, repo, tag):
@@ -87,23 +83,28 @@ def service_version(metadata):
     return services[0]["version"]
 
 
+def release_suites(api, repo, sha, run_id):
+    """Check suites of every release run on the commit, including this one.
+
+    Dispatched runs report on the main head, so an earlier failed release would otherwise
+    block every later release of that commit.
+    """
+    run = api("GET", f"repos/{repo}/actions/runs/{run_id}")
+    runs = pages(api, f"repos/{repo}/actions/workflows/{run['workflow_id']}/runs?head_sha={sha}",
+                 "workflow_runs")
+    return {run["check_suite_id"]} | {other["check_suite_id"] for other in runs}
+
+
 def require_passing_checks(api, repo, sha, run_id):
-    """Every existing check and status on the commit must pass, except this run's own jobs."""
-    own_suite = api("GET", f"repos/{repo}/actions/runs/{run_id}")["check_suite_id"]
+    """Every existing check and status on the commit must pass, except release runs' own jobs."""
+    ignored = release_suites(api, repo, sha, run_id)
     failing = []
-    page = 1
-    while True:
-        response = api("GET", f"repos/{repo}/commits/{sha}/check-runs?per_page=100&page={page}")
-        runs = response["check_runs"]
-        for run in runs:
-            if run["check_suite"]["id"] == own_suite:
-                continue
-            if run["status"] != "completed" or run["conclusion"] not in PASSING:
-                failing.append(run["name"])
-        if len(runs) < 100:
-            break
-        page += 1
-    for status in api("GET", f"repos/{repo}/commits/{sha}/status")["statuses"]:
+    for run in pages(api, f"repos/{repo}/commits/{sha}/check-runs", "check_runs"):
+        if run["check_suite"]["id"] in ignored:
+            continue
+        if run["status"] != "completed" or run["conclusion"] not in PASSING:
+            failing.append(run["name"])
+    for status in pages(api, f"repos/{repo}/commits/{sha}/status", "statuses"):
         if status["state"] != "success":
             failing.append(status["context"])
     if failing:
