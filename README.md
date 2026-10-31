@@ -210,8 +210,8 @@ gh workflow run release.yml -f version=1.2.3
 Run it again with `-f dry_run=false` to create the `v1.2.3` tag and a GitHub Release with generated notes.
 
 The run fails before any tag exists when the version is not `X.Y.Z`, the commit is not on `main`, the service package version differs, the tag already exists, or any existing check or status on the commit failed or is still running.
-A cancelled check does not block, whoever cancelled it, and neither do earlier release runs' own checks.
-The run's own lint and tests are the only replacement for a cancelled check.
+Only GitHub Actions runs from `push` and `pull_request` events count, because manual, comment and scheduled runs report on the `main` head whatever they test. Checks from other apps still count.
+A cancelled check run does not block, whoever cancelled it, and the run's own lint and tests are the only replacement for it. A cancelled command's `error` status still blocks.
 It then runs `make lint` and `make test` with default features and `api-doc` on the commit.
 Only the final job, which runs after every check passes, has permission to write.
 Anyone with write access can run the workflow, so it adds no approval beyond repository permissions.

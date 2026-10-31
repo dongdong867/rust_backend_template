@@ -12,8 +12,11 @@ from urllib.parse import quote
 import github_client
 
 
-# A newer push cancels main validation; this run lints and tests the commit itself.
+# Any cancelled check run passes; this run repeats only lint and fast tests.
 PASSING = ("success", "neutral", "skipped", "cancelled")
+# Only these events test the commit they report on. Manual, comment and scheduled runs
+# report on the main head at start time, whatever they test.
+COMMIT_EVENTS = ("push", "pull_request")
 
 
 def parse_version(value):
@@ -73,22 +76,18 @@ def service_version(metadata):
     return services[0]["version"]
 
 
-def release_suites(api, repo, sha, run_id):
-    """Check suites of every release run on the commit, including this one.
-
-    Dispatched runs report on the main head, so an earlier failed release would otherwise
-    block every later release of that commit.
-    """
-    run = api("GET", f"repos/{repo}/actions/runs/{run_id}")
-    runs = github_client.pages(
-        api, f"repos/{repo}/actions/workflows/{run['workflow_id']}/runs?head_sha={sha}", "workflow_runs"
-    )
-    return {run["check_suite_id"]} | {other["check_suite_id"] for other in runs}
+def unrelated_suites(api, repo, sha, run_id):
+    """Check suites on the commit from this run and from Actions runs that do not test it."""
+    own = api("GET", f"repos/{repo}/actions/runs/{run_id}")
+    runs = github_client.pages(api, f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
+    return {own["check_suite_id"]} | {
+        run["check_suite_id"] for run in runs if run["event"] not in COMMIT_EVENTS
+    }
 
 
 def require_passing_checks(api, repo, sha, run_id):
-    """Every existing check and status on the commit must pass, except release runs' own jobs."""
-    ignored = release_suites(api, repo, sha, run_id)
+    """Every check and status about the commit must pass."""
+    ignored = unrelated_suites(api, repo, sha, run_id)
     failing = []
     for run in github_client.pages(api, f"repos/{repo}/commits/{sha}/check-runs", "check_runs"):
         if run["check_suite"]["id"] in ignored:

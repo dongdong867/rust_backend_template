@@ -41,7 +41,7 @@ def fixture():
     data = {
         "main": MAIN, "compare": {MAIN: "identical", OLDER: "ahead"},
         "tags": {}, "check_runs": {}, "statuses": {}, "suite": 7, "calls": [],
-        "release_suites": [7],
+        "workflow_runs": {},
         "release_tag_sha": None,
     }
 
@@ -58,10 +58,10 @@ def fixture():
             sha = data["tags"].get(tag)
             return None if sha is None else {"object": {"sha": sha, "type": "commit"}}
         if method == "GET" and path == f"{prefix}/actions/runs/{RUN}":
-            return {"id": int(RUN), "check_suite_id": data["suite"], "workflow_id": 31}
-        if method == "GET" and path.startswith(f"{prefix}/actions/workflows/31/runs?"):
+            return {"id": int(RUN), "check_suite_id": data["suite"]}
+        if method == "GET" and path.startswith(f"{prefix}/actions/runs?"):
             sha = path.split("head_sha=")[1].split("&")[0]
-            runs = [{"check_suite_id": s, "head_sha": sha} for s in data["release_suites"]]
+            runs = data["workflow_runs"].get(sha, [])
             page = int(path.rsplit("page=", 1)[1])
             return {"total_count": len(runs), "workflow_runs": runs[(page - 1) * 100:page * 100]}
         if method == "GET" and "/check-runs?" in path:
@@ -161,7 +161,7 @@ class VerifyTest(unittest.TestCase):
                 self.assert_rejected("Source and generated variants")
 
     def test_passing_neutral_skipped_and_cancelled_checks_are_accepted(self):
-        # A newer push cancels main validation; the release run lints and tests itself.
+        # Any cancelled check run passes; the release run repeats only lint and fast tests.
         self.data["check_runs"][MAIN] = [
             check("a"), check("b", conclusion="neutral"), check("c", conclusion="skipped"),
             check("d", conclusion="cancelled"),
@@ -174,21 +174,60 @@ class VerifyTest(unittest.TestCase):
         ]
         self.assertEqual(self.verify()["sha"], MAIN)
 
+    def runs_on_main(self, *suites):
+        self.data["workflow_runs"][MAIN] = [
+            {"check_suite_id": suite, "event": event, "head_sha": MAIN} for suite, event in suites
+        ]
+
     def test_earlier_release_runs_checks_are_ignored(self):
-        # Dispatched runs report on the main head, so an earlier failed release sits there too.
-        self.data["release_suites"] = [5, 7]
+        self.runs_on_main((5, "workflow_dispatch"))
         self.data["check_runs"][MAIN] = [check("Verify release", conclusion="failure", suite=5)]
         self.assertEqual(self.verify()["sha"], MAIN)
 
-    def test_release_runs_on_later_pages_are_read(self):
-        self.data["release_suites"] = list(range(100, 200)) + [5]
-        self.data["check_runs"][MAIN] = [check("Verify release", conclusion="failure", suite=5)]
+    def test_failed_pr_commands_do_not_block_a_commit_that_passed_validation(self):
+        # The shape of real commit 05e99b4: the worker reports on the main head, whatever it tests.
+        self.runs_on_main((1, "push"), (5, "workflow_dispatch"), (6, "workflow_dispatch"), (8, "workflow_dispatch"))
+        self.data["check_runs"][MAIN] = [
+            check("Source and generated variants", suite=1),
+            check("Validate accepted request", conclusion="failure", suite=5),
+            check("Run PR command", conclusion="failure", suite=6),
+            check("Run PR command", conclusion="failure", suite=8),
+        ]
         self.assertEqual(self.verify()["sha"], MAIN)
 
-    def test_other_workflows_checks_still_count(self):
-        self.data["release_suites"] = [5, 7]
-        self.data["check_runs"][MAIN] = [check("Source and generated variants", conclusion="failure", suite=6)]
-        self.assert_rejected("Source and generated variants")
+    def test_runs_that_only_report_on_the_main_head_are_ignored(self):
+        for event in ("workflow_dispatch", "issue_comment", "dynamic", "schedule"):
+            for run in (check("unrelated", conclusion="failure", suite=5),
+                        check("unrelated", status="in_progress", conclusion=None, suite=5)):
+                with self.subTest(event=event, status=run["status"]):
+                    self.runs_on_main((5, event))
+                    self.data["check_runs"][MAIN] = [run]
+                    self.assertEqual(self.verify()["sha"], MAIN)
+
+    def test_runs_on_later_pages_are_read(self):
+        self.runs_on_main(*[(n, "push") for n in range(100, 200)], (5, "issue_comment"))
+        self.data["check_runs"][MAIN] = [check("unrelated", conclusion="failure", suite=5)]
+        self.assertEqual(self.verify()["sha"], MAIN)
+
+    def test_push_and_pull_request_runs_still_count(self):
+        for event in ("push", "pull_request"):
+            for run in (check("Source and generated variants", conclusion="failure", suite=5),
+                        check("Source and generated variants", status="in_progress", conclusion=None, suite=5)):
+                with self.subTest(event=event, status=run["status"]):
+                    self.runs_on_main((5, event))
+                    self.data["check_runs"][MAIN] = [run]
+                    self.assert_rejected("Source and generated variants")
+
+    def test_checks_from_other_apps_still_count(self):
+        self.runs_on_main((5, "issue_comment"))
+        self.data["check_runs"][MAIN] = [check("External scan", conclusion="failure", suite=6)]
+        self.assert_rejected("External scan")
+
+    def test_unrelated_runs_of_another_commit_are_not_applied(self):
+        # Selecting an older commit reads that commit's runs, not the main head's.
+        self.runs_on_main((5, "issue_comment"))
+        self.data["check_runs"][OLDER] = [check("Source and generated variants", conclusion="failure", suite=5)]
+        self.assert_rejected("Source and generated variants", values=inputs(commit=OLDER))
 
     def test_checks_on_later_pages_are_read(self):
         self.data["check_runs"][MAIN] = [check(f"ok-{n}") for n in range(100)] + [
