@@ -226,13 +226,25 @@ class CiPolicyTest(unittest.TestCase):
             self.assertNotIn(forbidden, publish)
 
     def test_only_the_release_workflow_starts_postgres(self):
-        for name in ("format.yml", "template-ci.yml", "ci-command.yml", "ci-command-worker.yml"):
+        names = {path.name for path in (ROOT / ".github/workflows").glob("*.yml")}
+        self.assertIn("release.yml", names)
+        for name in names - {"release.yml"}:
             text = self.workflow(name)
             for forbidden in ("services:", "postgres", "test-db", "TEST_DATABASE_URL"):
                 self.assertNotIn(forbidden, text, name)
         hook = (ROOT / ".githooks/pre-commit").read_text()
         for forbidden in ("postgres", "test-db", "TEST_DATABASE_URL"):
             self.assertNotIn(forbidden, hook)
+
+    def test_fast_tests_do_not_run_database_tests(self):
+        recipe = subprocess.run(["make", "-n", "test"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+        self.assertIn("cargo test", recipe)
+        for forbidden in ("--ignored", "test-db", "TEST_DATABASE_URL"):
+            self.assertNotIn(forbidden, recipe)
+
+    def test_agents_guide_says_to_extend_the_database_test_target(self):
+        for name in ("AGENTS.md", "AGENTS.md.liquid"):
+            self.assertIn("add its test binary to the `test-db` target", (ROOT / name).read_text(), name)
 
     def test_only_source_workflow_is_excluded_from_generation(self):
         excluded = (ROOT / ".genignore").read_text().splitlines()
