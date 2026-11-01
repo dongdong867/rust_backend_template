@@ -115,3 +115,4 @@ A hand-started `release.yml` run on `main` verifies the current `main` head, the
 The service package is the only workspace package with a binary target; only its version must match the tag.
 Verification has a read-only token. A release is always the commit the run started on, so one checkout holds both `.github/ci/release.py` and the release commit. `GITHUB_TOKEN` cannot release a commit that differs from `main` in workflow files, so a run stops if `main` has moved.
 Only the publish job has `contents: write`, and it skips dry runs.
+The verify job starts a temporary PostgreSQL and runs the real database tests, so broken SQL stops a release even if nobody ran `make check` by hand. Fast tests, pull request workflows and the pre-commit hook stay database-free.

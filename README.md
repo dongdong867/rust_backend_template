@@ -129,7 +129,7 @@ TEST_DATABASE_URL=postgres://localhost/postgres make check
 
 Use a **dedicated test server**, not production. Its role needs `CREATEDB` permission.
 Database tests create isolated databases and may leave failed-test databases or harness bookkeeping for inspection.
-They require `TEST_DATABASE_URL`; no command starts PostgreSQL automatically.
+They require `TEST_DATABASE_URL`; no `make` command starts PostgreSQL automatically.
 The pre-commit hook remains database-free.
 
 ## GitHub automation
@@ -142,7 +142,8 @@ The source-only `.github/workflows/template-ci.yml` is excluded from generation 
 It runs Clippy and fast tests with default features and `api-doc`, plus database-free checks of both generated variants, on reviewable pull requests and pushes to `main`.
 Source drafts run formatting only: `ready_for_review` starts heavy validation, and `converted_to_draft` cancels it.
 Generated services retain formatting-only defaults regardless of repository visibility, with no `main`-push automation.
-CI does not replace full `make check` (default and `FEATURES=api-doc`) or `make template-test`; these still require the existing dedicated `TEST_DATABASE_URL` server.
+Pull request and `main` CI do not replace full `make check` (default and `FEATURES=api-doc`) or `make template-test`; these still require the existing dedicated `TEST_DATABASE_URL` server.
+The release workflow runs `make test-db` on this repository's code, but it does not test generated variants, so `make template-test` stays a manual check.
 
 Pull request workflows use read-only `pull_request` permissions, optional caches, and no production secrets or databases.
 For public repositories, in **Settings > Actions > General**, select **Require approval for all external contributors** for workflows from fork pull requests.
@@ -212,7 +213,7 @@ Run it again with `-f dry_run=false` to create the `v1.2.3` tag and a GitHub Rel
 The run fails before any tag exists when the version is not `X.Y.Z`, `main` has moved since the run started, the service package version differs, the tag already exists, or any existing run, check or status on the commit failed or is still running.
 Only GitHub Actions runs from `push` and `pull_request` events count, because manual, comment and scheduled runs report on the `main` head whatever they test. Checks from other apps still count, and `ci-command-state/` bookkeeping statuses do not.
 A cancelled check run does not block, whoever cancelled it, and the run's own lint and tests are the only replacement for it. A cancelled command's `error` status still blocks.
-It then runs `make lint` and `make test` with default features and `api-doc` on the commit.
+It then runs `make lint`, `make test` and `make test-db` with default features and `api-doc` on the commit. The database tests use a temporary PostgreSQL that the run starts for itself.
 Only the final job, which runs after every check passes, has permission to write.
 Anyone with write access can run the workflow, so it adds no approval beyond repository permissions.
 

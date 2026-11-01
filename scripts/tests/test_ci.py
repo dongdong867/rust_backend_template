@@ -210,6 +210,30 @@ class CiPolicyTest(unittest.TestCase):
             self.assertIn("persist-credentials: false", section)
             self.assertRegex(section, r"timeout-minutes: \d+")
 
+    def test_release_runs_real_database_tests_on_its_own_postgres(self):
+        sections = jobs(self.workflow("release.yml"))
+        verify, publish = sections["verify"], sections["publish"]
+        self.assertRegex(verify, r"(?m)^    services:\n      postgres:\n"
+                                 r"        image: postgres:18\.6@sha256:[a-f0-9]{64}$")
+        # The temporary server accepts connections without a password, so only this runner reaches it.
+        self.assertIn("- 127.0.0.1:5432:5432\n", verify)
+        self.assertIn("--health-cmd", verify)
+        self.assertEqual(verify.count("TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n"), 2)
+        last_fast_test = verify.index("make test FEATURES=api-doc")
+        for target in ("make test-db FEATURES=\n", "make test-db FEATURES=api-doc"):
+            self.assertLess(last_fast_test, verify.index(target))
+        for forbidden in ("services:", "test-db", "TEST_DATABASE_URL"):
+            self.assertNotIn(forbidden, publish)
+
+    def test_only_the_release_workflow_starts_postgres(self):
+        for name in ("format.yml", "template-ci.yml", "ci-command.yml", "ci-command-worker.yml"):
+            text = self.workflow(name)
+            for forbidden in ("services:", "postgres", "test-db", "TEST_DATABASE_URL"):
+                self.assertNotIn(forbidden, text, name)
+        hook = (ROOT / ".githooks/pre-commit").read_text()
+        for forbidden in ("postgres", "test-db", "TEST_DATABASE_URL"):
+            self.assertNotIn(forbidden, hook)
+
     def test_only_source_workflow_is_excluded_from_generation(self):
         excluded = (ROOT / ".genignore").read_text().splitlines()
         self.assertIn("/.github/workflows/template-ci.yml", excluded)

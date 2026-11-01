@@ -153,7 +153,7 @@ class VerifyTest(unittest.TestCase):
                 self.assert_rejected("Source and generated variants")
 
     def test_passing_neutral_skipped_and_cancelled_checks_are_accepted(self):
-        # Any cancelled check run passes; the release run repeats only lint and fast tests.
+        # Any cancelled check run passes; the release run repeats only lint, fast tests and database tests.
         self.data["check_runs"][MAIN] = [
             check("a"), check("b", conclusion="neutral"), check("c", conclusion="skipped"),
             check("d", conclusion="cancelled"),
