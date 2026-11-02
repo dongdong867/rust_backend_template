@@ -237,9 +237,13 @@ class CiPolicyTest(unittest.TestCase):
             self.assertNotIn(forbidden, hook)
 
     def test_fast_tests_do_not_run_database_tests(self):
-        recipe = subprocess.run(["make", "-n", "test"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+        recipe = subprocess.run(
+            ["make", "--no-print-directory", "-n", "test"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout
         self.assertIn("cargo test", recipe)
-        for forbidden in ("--ignored", "test-db", "TEST_DATABASE_URL"):
+        # "ignored" covers both cargo flags: --ignored and --include-ignored.
+        for forbidden in ("ignored", "test-db", "TEST_DATABASE_URL"):
             self.assertNotIn(forbidden, recipe)
 
     def test_agents_guide_says_to_extend_the_database_test_target(self):
