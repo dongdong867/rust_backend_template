@@ -32,6 +32,19 @@ jobs:
       actions: read
       checks: read
       statuses: read
+    services:
+      postgres:
+        image: postgres:18.6@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        # No password, so only this runner can reach the temporary server.
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready --username postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -58,6 +71,14 @@ jobs:
         run: make test FEATURES=
       - name: API documentation fast tests
         run: make test FEATURES=api-doc
+      - name: Default database tests
+        env:
+          TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
+        run: make test-db FEATURES=
+      - name: API documentation database tests
+        env:
+          TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
+        run: make test-db FEATURES=api-doc
 
   publish:
     name: Create tag and release

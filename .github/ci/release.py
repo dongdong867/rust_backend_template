@@ -12,7 +12,7 @@ from urllib.parse import quote
 import github_client
 
 
-# Any cancelled check run passes; this run repeats only lint and fast tests.
+# Any cancelled check run passes; this run repeats only lint, fast tests and database tests.
 PASSING = ("success", "neutral", "skipped", "cancelled")
 # These runs report on their own push or PR head. Manual, comment and scheduled runs
 # report on the main head at start time, whatever they test.
