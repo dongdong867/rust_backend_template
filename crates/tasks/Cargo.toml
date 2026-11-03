@@ -20,3 +20,4 @@ utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tracing-subscriber.workspace = true

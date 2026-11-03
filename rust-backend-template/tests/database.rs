@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 
 use actix_web::http::header::CONTENT_TYPE;
 use actix_web::{http::StatusCode, test};
-use environment::Config;
+use environment::{Config, LogFormat};
 use rust_backend_template::{
     container::Container, create_app::create_app, database::create_pool, providers::Providers,
+    telemetry,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -122,6 +123,68 @@ async fn creating_a_task_fails_with_500_after_the_acquire_timeout_when_the_datab
         "answered after {elapsed:?}"
     );
     assert!(elapsed < Duration::from_secs(5), "waited {elapsed:?}");
+    database.close().await;
+}
+
+#[::core::prelude::v1::test]
+fn a_pool_timeout_logs_its_own_reason_without_connection_details() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "pool_timeout_log_probe",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let logs = String::from_utf8(output.stdout).unwrap();
+    for detail in ["postgres://", "closed_probe", "timed out"] {
+        assert!(!logs.contains(detail), "{detail} in {logs}");
+    }
+    let events: Vec<Value> = logs
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let storage = events
+        .iter()
+        .find(|event| event["message"] == "task persistence failed")
+        .expect("the storage failure must be logged");
+    assert_eq!(storage["level"], "ERROR");
+    assert_eq!(storage["reason"], "pool_timeout");
+    let route = events
+        .iter()
+        .find(|event| event["message"] == "task operation failed")
+        .expect("the route failure must still be logged");
+    assert_eq!(route["reason"], "persistence");
+}
+
+#[actix_web::test]
+#[ignore = "invoked by the parent test in a fresh process to isolate tracing's subscriber cache"]
+async fn pool_timeout_log_probe() {
+    telemetry::init("info", LogFormat::Json);
+    let (config, _port) = closed_port_config(Some("1"));
+    let database = create_pool(&config.database).unwrap();
+    let app = test::init_service(create_app(
+        config.http,
+        container_for(&database),
+        #[cfg(feature = "api-doc")]
+        config.api_doc,
+    ))
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/tasks")
+            .set_json(json!({"title": "Write documentation"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     database.close().await;
 }
 
