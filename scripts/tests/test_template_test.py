@@ -117,6 +117,104 @@ class TemplateChecksTest(unittest.TestCase):
             template_test.check_generated(self.output, structure_only=True)
         run.assert_not_called()
 
+    def fake_cargo(self, watched):
+        """Embed the migrations in each target, refreshing only the targets in `watched`."""
+        migrations = self.output / "migrations"
+        migrations.mkdir(exist_ok=True)
+        binaries = self.root / "binaries"
+        binaries.mkdir(exist_ok=True)
+        bin_test = ("migrate", ["bin"], True)
+        targets = {"build": [("migrate", ["bin"], False)],
+                   "test": [("migrate", ["bin"], False), ("postgres_database", ["test"], True),
+                            ("postgres_task_repository", ["test"], True), bin_test,
+                            ("tasks", ["lib"], True)]}
+
+        def run(command, **kwargs):
+            lines = []
+            for name, kind, test in targets[command[1]]:
+                executable = binaries / f"{command[1]}-{name}-{kind[0]}-{test}"
+                if (name, kind, test) == bin_test:
+                    # A binary's unit-test harness has no main function, so it embeds nothing.
+                    executable.write_bytes(b"")
+                elif name in watched or not executable.exists():
+                    executable.write_bytes(b"".join(
+                        path.read_bytes() for path in sorted(migrations.glob("*.sql"))
+                    ))
+                lines.append(json.dumps({"reason": "compiler-artifact",
+                                         "target": {"name": name, "kind": kind},
+                                         "profile": {"test": test},
+                                         "executable": str(executable)}))
+            # Cargo also reports libraries, which have no executable, and other messages.
+            lines.append(json.dumps({"reason": "compiler-artifact",
+                                     "target": {"name": "library", "kind": ["lib"]},
+                                     "profile": {"test": False}, "executable": None}))
+            lines.append(json.dumps({"reason": "build-finished", "success": True}))
+            return subprocess.CompletedProcess(command, 0, stdout="\n".join(lines) + "\n")
+
+        return run
+
+    def check_rebuild(self, watched, include_tasks=False):
+        with patch.object(template_test.subprocess, "run",
+                          side_effect=self.fake_cargo(watched)) as run:
+            try:
+                template_test.check_migration_rebuild(self.output, include_tasks)
+            finally:
+                self.assertEqual(list((self.output / "migrations").glob("*.sql")), [])
+        return run
+
+    def test_migration_rebuild_reaches_every_migration_binary(self):
+        run = self.check_rebuild({"migrate", "postgres_database"})
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands, list(template_test.REBUILD_COMMANDS) * 2)
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["cwd"], self.output)
+            self.assertTrue(call.kwargs["check"])
+            self.assertEqual(call.kwargs["env"]["CARGO_TARGET_DIR"],
+                             str(template_test.ROOT / "target/template-test"))
+            self.assertNotIn("DATABASE_URL", call.kwargs["env"])
+
+    def test_migration_rebuild_names_binaries_without_the_new_migration(self):
+        with self.assertRaisesRegex(RuntimeError, r"missing from: migrate, postgres_database\."):
+            self.check_rebuild(set())
+        with self.assertRaisesRegex(RuntimeError, r"missing from: postgres_database\."):
+            self.check_rebuild({"migrate"})
+
+    def test_migration_rebuild_requires_each_expected_binary(self):
+        (self.output / "migrations").mkdir()
+        with patch.object(template_test.subprocess, "run", return_value=subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({"reason": "build-finished", "success": True}) + "\n"
+        )), self.assertRaisesRegex(RuntimeError, r"missing from: migrate, postgres_database\."):
+            template_test.check_migration_rebuild(self.output, False)
+
+    def test_migration_rebuild_removes_its_probe_after_a_build_failure(self):
+        (self.output / "migrations").mkdir()
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if len(calls) > len(template_test.REBUILD_COMMANDS):
+                self.assertEqual(len(list((self.output / "migrations").glob("*.sql"))), 1)
+                raise subprocess.CalledProcessError(101, command)
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        with patch.object(template_test.subprocess, "run", side_effect=run), \
+                self.assertRaises(subprocess.CalledProcessError):
+            template_test.check_migration_rebuild(self.output, False)
+        self.assertEqual(list((self.output / "migrations").glob("*.sql")), [])
+
+    def test_migration_rebuild_keeps_existing_migrations(self):
+        self.write(self.output, "migrations/0001_existing.sql", "CREATE TABLE existing ();\n")
+        with patch.object(template_test.subprocess, "run",
+                          side_effect=self.fake_cargo({"migrate", "postgres_database"})):
+            template_test.check_migration_rebuild(self.output, False)
+        self.assertEqual([path.name for path in (self.output / "migrations").glob("*.sql")],
+                         ["0001_existing.sql"])
+
+    def test_structure_only_skips_the_migration_rebuild(self):
+        with patch.object(template_test.subprocess, "run") as run:
+            template_test.check_migration_rebuild(self.output, True, structure_only=True)
+        run.assert_not_called()
+
     def test_make_feature_flags(self):
         result = subprocess.check_output(
             ["make", "-n", "run", "migrate", "build", "test", "test-db", "FEATURES=api-doc"],
