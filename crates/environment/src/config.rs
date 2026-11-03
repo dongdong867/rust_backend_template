@@ -119,6 +119,21 @@ fn read_database_config(
             "a positive 32-bit connection count",
             |value| value.parse().ok().filter(|count| *count > 0),
         )?,
+        acquire_timeout: setting(
+            lookup,
+            "DATABASE_ACQUIRE_TIMEOUT_SECS",
+            Some(DatabaseConfig::DEFAULT_ACQUIRE_TIMEOUT),
+            "a positive number of seconds up to 300",
+            |value| {
+                value
+                    .parse()
+                    .ok()
+                    .filter(|seconds| {
+                        (1..=DatabaseConfig::MAX_ACQUIRE_TIMEOUT_SECS).contains(seconds)
+                    })
+                    .map(Duration::from_secs)
+            },
+        )?,
     })
 }
 
@@ -353,6 +368,7 @@ mod tests {
         DatabaseConfig {
             url: DatabaseUrl::parse(TEST_DATABASE_URL).unwrap(),
             max_connections: DatabaseConfig::DEFAULT_MAX_CONNECTIONS,
+            acquire_timeout: DatabaseConfig::DEFAULT_ACQUIRE_TIMEOUT,
         }
     }
 
@@ -647,8 +663,54 @@ mod tests {
     }
 
     #[test]
+    fn database_acquire_timeout_default_and_explicit_values() {
+        assert_eq!(
+            load(&[]).unwrap().database.acquire_timeout,
+            Duration::from_secs(10)
+        );
+        for (value, seconds) in [("1", 1), ("+10", 10), ("42", 42), ("300", 300)] {
+            assert_eq!(
+                load(&[("DATABASE_ACQUIRE_TIMEOUT_SECS", value)])
+                    .unwrap()
+                    .database
+                    .acquire_timeout,
+                Duration::from_secs(seconds)
+            );
+        }
+    }
+
+    #[test]
+    fn database_acquire_timeout_is_whole_seconds_from_1_to_300() {
+        for value in [
+            "0",
+            "-1",
+            "1.5",
+            "",
+            " 10",
+            "301",
+            "1000",
+            "18446744073709551615",
+            "99999999999999999999",
+            "soon",
+        ] {
+            let error = load(&[("DATABASE_ACQUIRE_TIMEOUT_SECS", value)]).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid DATABASE_ACQUIRE_TIMEOUT_SECS: expected a positive number of seconds up to {}, got {value:?}",
+                    DatabaseConfig::MAX_ACQUIRE_TIMEOUT_SECS
+                )
+            );
+        }
+    }
+
+    #[test]
     fn nonunicode_database_settings_fail_without_the_value() {
-        for setting in ["DATABASE_URL", "DATABASE_MAX_CONNECTIONS"] {
+        for setting in [
+            "DATABASE_URL",
+            "DATABASE_MAX_CONNECTIONS",
+            "DATABASE_ACQUIRE_TIMEOUT_SECS",
+        ] {
             let error = Config::from_try_lookup(|name| {
                 if name == setting {
                     Err(ConfigError::NotUnicode { name })
@@ -681,6 +743,7 @@ mod tests {
         .unwrap();
         assert_eq!(calls.borrow()["DATABASE_URL"], 1);
         assert_eq!(calls.borrow()["DATABASE_MAX_CONNECTIONS"], 1);
+        assert_eq!(calls.borrow()["DATABASE_ACQUIRE_TIMEOUT_SECS"], 1);
     }
 
     #[test]

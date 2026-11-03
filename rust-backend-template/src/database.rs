@@ -20,5 +20,6 @@ pub fn create_pool(config: &DatabaseConfig) -> io::Result<PgPool> {
     Ok(PgPoolOptions::new()
         .min_connections(0)
         .max_connections(config.max_connections)
+        .acquire_timeout(config.acquire_timeout)
         .connect_lazy_with(options))
 }
