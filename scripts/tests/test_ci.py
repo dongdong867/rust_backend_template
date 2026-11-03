@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 
@@ -23,6 +24,12 @@ def jobs(text):
     names = re.findall(r"^  ([\w-]+):$", body, re.M)
     parts = re.split(r"^  [\w-]+:$", body, flags=re.M)[1:]
     return dict(zip(names, parts))
+
+
+def disk_report(job):
+    """Return the disk report script that a job writes in its first report step."""
+    body = re.search(r"<<'REPORT'\n(.*?\n)\s*REPORT\n", job, re.S).group(1)
+    return textwrap.dedent(body)
 
 
 class CiPolicyTest(unittest.TestCase):
@@ -77,6 +84,49 @@ class CiPolicyTest(unittest.TestCase):
         # Without these, cargo install refuses to overwrite the restored generator binary.
         self.assertIn(".tools/.crates.toml", text)
         self.assertIn(".tools/.crates2.json", text)
+
+    def test_disk_report_surrounds_cache_restore_and_runs_after_failure(self):
+        validate = jobs(self.workflow("template-ci.yml"))["validate"]
+        order = [validate.index(marker) for marker in (
+            "- name: Report disk before cache restore\n",
+            "uses: actions/cache@",
+            "- name: Report disk after cache restore\n",
+            "run: make template-test-fast\n",
+            "- name: Report disk at job end\n",
+        )]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("- name: Report disk at job end\n        if: always()\n", validate)
+        report = disk_report(validate)
+        self.assertIn('df -h "$GITHUB_WORKSPACE" /', report)
+        cached = re.search(r"path: \|\n((?:            .*\n)+)", validate).group(1).split()
+        for path in [*cached, "target/debug", "target/template-test"]:
+            self.assertIn(path.replace("~/", "$HOME/"), report)
+
+    def test_disk_report_tolerates_missing_paths_and_emits_notices(self):
+        report = disk_report(jobs(self.workflow("template-ci.yml"))["validate"])
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "target/debug/deps").mkdir(parents=True)
+            (workspace / "target/debug/deps/lib.rlib").write_bytes(b"x" * 4096)
+            script = workspace / "disk-report.sh"
+            script.write_text(report)
+            result = subprocess.run(
+                ["bash", str(script), "before restore"], cwd=workspace, capture_output=True, text=True,
+                env={"PATH": "/usr/bin:/bin", "HOME": str(workspace / "home"),
+                     "GITHUB_WORKSPACE": str(workspace)},
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        notices = re.findall(r"^::notice title=([^:]+)::(.+)$", result.stdout, re.M)
+        self.assertEqual([title for title, _ in notices],
+                         ["Disk before restore", "Sizes before restore"])
+        self.assertRegex(notices[0][1], r"^workspace \S+ free, / \S+ free$")
+        sizes = dict(item.rsplit(" ", 1) for item in notices[1][1].split(", "))
+        self.assertEqual(sizes["target/template-test/debug/deps"], "missing")
+        self.assertEqual(sizes[f"{workspace}/home/.cargo/registry"], "missing")
+        self.assertNotEqual(sizes["target/debug/deps"], "missing")
+        for path in ("target/debug/incremental", "target/template-test/debug/incremental"):
+            self.assertIn(path, sizes)
 
     def test_command_controller_never_checks_out_or_executes_pr_code(self):
         text = self.workflow("ci-command.yml")

@@ -34,6 +34,28 @@ jobs:
         with:
           tool: taplo@${{ steps.tools.outputs.taplo }}
           fallback: none
+      - name: Report disk before cache restore
+        run: |
+          # Temporary measurement of what fills the disk; the cache fix removes it.
+          cat > "$RUNNER_TEMP/disk-report.sh" <<'REPORT'
+          # A runner that fills its disk loses the log but keeps annotations.
+          label=$1
+          df -h "$GITHUB_WORKSPACE" /
+          available() { df -Ph "$1" | awk 'NR == 2 { print $4 }'; }
+          echo "::notice title=Disk $label::workspace $(available "$GITHUB_WORKSPACE") free, / $(available /) free"
+          sizes=()
+          for path in "$HOME/.cargo/registry" "$HOME/.cargo/git" target .tools/bin \
+              .tools/.crates.toml .tools/.crates2.json \
+              target/debug target/debug/incremental target/debug/deps target/template-test \
+              target/template-test/debug/incremental target/template-test/debug/deps; do
+            if [ -e "$path" ]; then size=$(du -sh "$path" | awk '{ print $1 }'); else size=missing; fi
+            printf '%s\t%s\n' "$size" "$path"
+            sizes+=("$path $size")
+          done
+          joined=$(printf '%s, ' "${sizes[@]}")
+          echo "::notice title=Sizes $label::${joined%, }"
+          REPORT
+          bash "$RUNNER_TEMP/disk-report.sh" "before restore"
       - name: Restore optional build cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -47,6 +69,8 @@ jobs:
             .tools/.crates.toml
             .tools/.crates2.json
           key: template-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Makefile', 'scripts/install_actionlint.py') }}
+      - name: Report disk after cache restore
+        run: bash "$RUNNER_TEMP/disk-report.sh" "after restore"
       - name: Install source verification tools
         run: make ci-tools template-tools
       - name: Validate actual workflow syntax
@@ -62,3 +86,6 @@ jobs:
         run: make test FEATURES=api-doc
       - name: Both generated variants and feature modes
         run: make template-test-fast
+      - name: Report disk at job end
+        if: always()
+        run: bash "$RUNNER_TEMP/disk-report.sh" "at job end"
