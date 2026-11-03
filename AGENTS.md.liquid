@@ -30,6 +30,7 @@ Run `make hooks-install` once per clone so each commit checks formatting first.
 - A feature has one shared adapter repository. It depends on a provider trait in `adapter/port/out` and plain storage DTOs, not concrete providers. The feature's `framework/storage` implements that provider with PostgreSQL or memory storage. Add other framework categories only when an integration needs them.
 - HTTP request and response types live in the feature's `adapter/dto`. A route handler in the service package calls the controller and maps its error to a status code.
 - Feature crates never depend on Actix or read environment variables. `domain`, `application` and `adapter` code never uses SQLx or imports `framework`, including their unit tests. SQLx belongs in `framework`; unit tests use port doubles, and public-interface integration tests may wire framework providers. Review imports and dependency direction against these rules.
+- A package whose code or tests embed migrations through sqlx macros needs a `build.rs` that prints `cargo:rerun-if-changed=<path to migrations>`.
 - Keep domain fields private when validation, coordinated transitions or stable identity require controlled mutation. DTO fields can be public. Domain/application errors are plain enums with `Debug` and needed comparison/clone derives; add `Display` or `Error` only for an actual caller requirement.
 - `DATABASE_URL` is required and has no runtime fallback. Keep example destinations in `.example.env`, never real secrets.
 - Logs never contain secrets, SQL, connection strings or query strings.

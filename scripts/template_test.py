@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,6 +22,11 @@ SHARED_CI_FILES = (
     ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
     ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
     ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
+)
+REBUILD_PROBE = "migrations/99999999999999_rebuild_probe.sql"
+REBUILD_COMMANDS = (
+    ("cargo", "build", "--locked", "--bin", "migrate", "--message-format=json"),
+    ("cargo", "test", "--locked", "--workspace", "--no-run", "--message-format=json"),
 )
 
 
@@ -227,10 +233,8 @@ def check_input_failures(executable, source, destination):
     print("Name collision guards and explicit command consent passed.", flush=True)
 
 
-def check_generated(project, *, fast_only=False, structure_only=False):
-    """Exercise both compiled modes with cache reuse, not operator application settings."""
-    if structure_only:
-        return
+def cargo_environment():
+    """Reuse one build cache, without operator application settings."""
     environment = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target/template-test"))
     # Keep TEST_DATABASE_URL: it deliberately selects the dedicated test server.
     for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL",
@@ -239,11 +243,61 @@ def check_generated(project, *, fast_only=False, structure_only=False):
                     "HTTP_CORS_ENABLED", "HTTP_CORS_ALLOWED_ORIGINS",
                     "HTTP_REQUEST_TIMEOUT_SECS", "HTTP_REQUEST_BODY_LIMIT_BYTES"):
         environment.pop(setting, None)
+    return environment
+
+
+def check_generated(project, *, fast_only=False, structure_only=False):
+    """Exercise both compiled modes with cache reuse, not operator application settings."""
+    if structure_only:
+        return
+    environment = cargo_environment()
     targets = ["lint", "test"] if fast_only else ["check"]
     for feature in ("", "api-doc"):
         command = ["make", *targets, f"FEATURES={feature}"]
         print("+", " ".join(command), flush=True)
         subprocess.run(command, cwd=project, env=environment, check=True)
+
+
+def built_executables(project, environment):
+    """Build every migration consumer and map each Cargo target name to its executables."""
+    executables = {}
+    for command in REBUILD_COMMANDS:
+        print("+", " ".join(command), flush=True)
+        result = subprocess.run(command, cwd=project, env=environment, check=True,
+                                stdout=subprocess.PIPE, text=True)
+        for line in result.stdout.splitlines():
+            message = json.loads(line)
+            if message.get("reason") != "compiler-artifact" or not message.get("executable"):
+                continue
+            target = message["target"]
+            # A binary's own unit-test harness replaces its main function, so it embeds nothing.
+            if message["profile"]["test"] and target["kind"] != ["test"]:
+                continue
+            executables.setdefault(target["name"], []).append(Path(message["executable"]))
+    return executables
+
+
+def check_migration_rebuild(project, include_tasks, *, structure_only=False):
+    """An added migration must reach each binary that embeds migrations, without a clean build."""
+    if structure_only:
+        return
+    expected = ["migrate", "postgres_database"] + (["postgres_task_repository"] if include_tasks else [])
+    environment = cargo_environment()
+    # Build once first, so the next build shows what the probe alone invalidates.
+    built_executables(project, environment)
+    marker = f"rebuild probe {uuid.uuid4().hex}".encode()
+    probe = project / REBUILD_PROBE
+    probe.write_bytes(b"-- " + marker + b"\nSELECT 1;\n")
+    try:
+        executables = built_executables(project, environment)
+    finally:
+        # Leave the generated project as it was, even after a failed build.
+        probe.unlink()
+    stale = [name for name in expected
+             if not executables.get(name)
+             or any(marker not in path.read_bytes() for path in executables[name])]
+    require(not stale, f"An added migration is missing from: {', '.join(stale)}. "
+                       "Each package that embeds migrations needs a build.rs watching them.")
 
 
 def main():
@@ -274,6 +328,7 @@ def main():
             check_project(project, name, include_tasks)
             check_generated(project, fast_only=args.fast_only,
                             structure_only=args.structure_only)
+            check_migration_rebuild(project, include_tasks, structure_only=args.structure_only)
     if args.structure_only:
         print("Generation structure and locked metadata passed; full make check was NOT run.")
     elif args.fast_only:
