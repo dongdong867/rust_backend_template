@@ -123,12 +123,15 @@ fn read_database_config(
             lookup,
             "DATABASE_ACQUIRE_TIMEOUT_SECS",
             Some(DatabaseConfig::DEFAULT_ACQUIRE_TIMEOUT),
+            // Keep the 300 in this message equal to DatabaseConfig::MAX_ACQUIRE_TIMEOUT_SECS.
             "a positive number of seconds up to 300",
             |value| {
                 value
                     .parse()
                     .ok()
-                    .filter(|seconds| (1..=300).contains(seconds))
+                    .filter(|seconds| {
+                        (1..=DatabaseConfig::MAX_ACQUIRE_TIMEOUT_SECS).contains(seconds)
+                    })
                     .map(Duration::from_secs)
             },
         )?,

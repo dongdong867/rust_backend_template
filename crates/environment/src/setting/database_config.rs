@@ -13,4 +13,5 @@ pub struct DatabaseConfig {
 impl DatabaseConfig {
     pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
     pub const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
+    pub const MAX_ACQUIRE_TIMEOUT_SECS: u64 = 300;
 }
