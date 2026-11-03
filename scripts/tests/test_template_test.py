@@ -118,7 +118,10 @@ class TemplateChecksTest(unittest.TestCase):
         run.assert_not_called()
 
     def fake_cargo(self, watched):
-        """Embed the migrations in each target, refreshing only the targets in `watched`."""
+        """Embed the migrations in each target, refreshing only the targets in `watched`.
+
+        A `watched` entry is a target name, or a (command, name) pair for one command's copy.
+        """
         migrations = self.output / "migrations"
         migrations.mkdir(exist_ok=True)
         binaries = self.root / "binaries"
@@ -136,7 +139,8 @@ class TemplateChecksTest(unittest.TestCase):
                 if (name, kind, test) == bin_test:
                     # A binary's unit-test harness has no main function, so it embeds nothing.
                     executable.write_bytes(b"")
-                elif name in watched or not executable.exists():
+                elif name in watched or (command[1], name) in watched \
+                        or not executable.exists():
                     executable.write_bytes(b"".join(
                         path.read_bytes() for path in sorted(migrations.glob("*.sql"))
                     ))
@@ -178,6 +182,10 @@ class TemplateChecksTest(unittest.TestCase):
             self.check_rebuild(set())
         with self.assertRaisesRegex(RuntimeError, r"missing from: postgres_database\."):
             self.check_rebuild({"migrate"})
+
+    def test_migration_rebuild_names_a_target_with_one_stale_executable(self):
+        with self.assertRaisesRegex(RuntimeError, r"missing from: migrate\."):
+            self.check_rebuild({("build", "migrate"), "postgres_database"})
 
     def test_migration_rebuild_expects_the_tasks_binary_only_with_the_example(self):
         self.check_rebuild({"migrate", "postgres_database"}, include_tasks=False)
