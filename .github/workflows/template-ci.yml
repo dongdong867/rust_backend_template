@@ -20,6 +20,10 @@ jobs:
     if: github.event_name == 'push' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # Keep the cached build small enough to restore on every runner; panics keep file and line.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,28 +38,6 @@ jobs:
         with:
           tool: taplo@${{ steps.tools.outputs.taplo }}
           fallback: none
-      - name: Report disk before cache restore
-        run: |
-          # Temporary measurement of what fills the disk; the cache fix removes it.
-          cat > "$RUNNER_TEMP/disk-report.sh" <<'REPORT'
-          # A runner that fills its disk loses the log but keeps annotations.
-          label=$1
-          df -h "$GITHUB_WORKSPACE" /
-          available() { df -Ph "$1" | awk 'NR == 2 { print $4 }'; }
-          echo "::notice title=Disk $label::workspace $(available "$GITHUB_WORKSPACE") free, / $(available /) free"
-          sizes=()
-          for path in "$HOME/.cargo/registry" "$HOME/.cargo/git" target .tools/bin \
-              .tools/.crates.toml .tools/.crates2.json \
-              target/debug target/debug/incremental target/debug/deps target/template-test \
-              target/template-test/debug/incremental target/template-test/debug/deps; do
-            if [ -e "$path" ]; then size=$(du -sh "$path" | awk '{ print $1 }'); else size=missing; fi
-            printf '%s\t%s\n' "$size" "$path"
-            sizes+=("$path $size")
-          done
-          joined=$(printf '%s, ' "${sizes[@]}")
-          echo "::notice title=Sizes $label::${joined%, }"
-          REPORT
-          bash "$RUNNER_TEMP/disk-report.sh" "before restore"
       - name: Restore optional build cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -68,9 +50,10 @@ jobs:
             .tools/bin
             .tools/.crates.toml
             .tools/.crates2.json
-          key: template-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Makefile', 'scripts/install_actionlint.py') }}
-      - name: Report disk after cache restore
-        run: bash "$RUNNER_TEMP/disk-report.sh" "after restore"
+          key: template-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Makefile', 'scripts/install_actionlint.py') }}
+      - name: Report free disk after cache restore
+        # Shows cache growth before it fills the disk.
+        run: echo "::notice title=Disk after restore::$(df -Ph "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }') free on the workspace disk"
       - name: Install source verification tools
         run: make ci-tools template-tools
       - name: Validate actual workflow syntax
@@ -86,6 +69,3 @@ jobs:
         run: make test FEATURES=api-doc
       - name: Both generated variants and feature modes
         run: make template-test-fast
-      - name: Report disk at job end
-        if: always()
-        run: bash "$RUNNER_TEMP/disk-report.sh" "at job end"
