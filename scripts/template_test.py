@@ -280,6 +280,7 @@ def check_migration_rebuild(project, include_tasks, *, structure_only=False):
         return
     expected = ["migrate", "postgres_database"] + (["postgres_task_repository"] if include_tasks else [])
     environment = cargo_environment()
+    # Build once first, so the next build shows what the probe alone invalidates.
     built_executables(project, environment)
     marker = f"rebuild probe {uuid.uuid4().hex}".encode()
     probe = project / REBUILD_PROBE
@@ -287,7 +288,7 @@ def check_migration_rebuild(project, include_tasks, *, structure_only=False):
     try:
         executables = built_executables(project, environment)
     finally:
-        # Remove the probe even after a failure, so no later check applies it to a database.
+        # Leave the generated project as it was, even after a failed build.
         probe.unlink()
     stale = [name for name in expected
              if not executables.get(name)
