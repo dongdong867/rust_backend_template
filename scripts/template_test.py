@@ -278,7 +278,7 @@ def check_migration_rebuild(project, include_tasks, *, structure_only=False):
     """An added migration must reach each binary that embeds migrations, without a clean build."""
     if structure_only:
         return
-    expected = ["migrate", "postgres_database"]
+    expected = ["migrate", "postgres_database"] + (["postgres_task_repository"] if include_tasks else [])
     environment = cargo_environment()
     built_executables(project, environment)
     marker = f"rebuild probe {uuid.uuid4().hex}".encode()

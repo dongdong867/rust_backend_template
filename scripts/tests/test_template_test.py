@@ -179,6 +179,13 @@ class TemplateChecksTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, r"missing from: postgres_database\."):
             self.check_rebuild({"migrate"})
 
+    def test_migration_rebuild_expects_the_tasks_binary_only_with_the_example(self):
+        self.check_rebuild({"migrate", "postgres_database"}, include_tasks=False)
+        with self.assertRaisesRegex(RuntimeError, r"missing from: postgres_task_repository\."):
+            self.check_rebuild({"migrate", "postgres_database"}, include_tasks=True)
+        self.check_rebuild({"migrate", "postgres_database", "postgres_task_repository"},
+                           include_tasks=True)
+
     def test_migration_rebuild_requires_each_expected_binary(self):
         (self.output / "migrations").mkdir()
         with patch.object(template_test.subprocess, "run", return_value=subprocess.CompletedProcess(
