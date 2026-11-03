@@ -41,11 +41,13 @@ fn container_for({% if include_tasks %}database{% else %}_database{% endif %}: &
     }{% else %}{}{% endif %}))
 }
 
+// `use actix_web::test` shadows the built-in `#[test]`, so this synchronous test names it by path.
 #[::core::prelude::v1::test]
 fn the_closed_port_stays_reserved_while_the_test_holds_it() {
-    let (config, _port) = closed_port_config(None);
-    let url = config.database.url.as_str();
-    let address = &url[url.find('@').unwrap() + 1..url.rfind('/').unwrap()];
+    let (config, port) = closed_port_config(None);
+    let address = port.local_addr().unwrap();
+    let url = url::Url::parse(config.database.url.as_str()).unwrap();
+    assert_eq!(url.socket_addrs(|| None).unwrap(), [address]);
     assert!(
         TcpListener::bind(address).is_err(),
         "another process could bind {address}"
