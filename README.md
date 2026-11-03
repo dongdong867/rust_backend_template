@@ -50,6 +50,7 @@ To allow browser access, set `HTTP_CORS_ALLOWED_ORIGINS` to comma-separated HTTP
 An origin such as `https://*.example.com` includes the apex and subdomains, but only with the same scheme and port.
 The empty allowlist permits no cross-origin browser access; CORS is not authentication or authorization.
 `HTTP_REQUEST_TIMEOUT_SECS` sets the request deadline; `HTTP_REQUEST_BODY_LIMIT_BYTES` limits buffered request bodies.
+`DATABASE_ACQUIRE_TIMEOUT_SECS` (whole seconds from 1 to 300, default 10) bounds how long a request waits for a database connection; a value at or above the request deadline ends requests with 504 instead.
 
 ### Optional API documentation
 
