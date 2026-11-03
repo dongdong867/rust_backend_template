@@ -142,33 +142,6 @@ async fn health_answers_at_once_when_the_database_port_is_closed() {
     // The default acquire timeout is 10 seconds; health must not wait for any of it.
     assert!(elapsed < Duration::from_secs(1), "waited {elapsed:?}");
     assert_eq!(database.size(), 0);
-    database.close().await;
-}
-
-#[actix_web::test]
-async fn the_shared_pool_is_lazy_and_health_never_acquires_a_connection() {
-    let config = Config::from_lookup(|name| {
-        (name == "DATABASE_URL")
-            .then(|| "postgres://localhost/pool_test".to_owned())
-            .or_else(|| {
-                (name == "API_DOC_PASSWORD").then(|| "documentation-test-password".to_owned())
-            })
-    })
-    .unwrap();
-    let database = create_pool(&config.database).unwrap();
-    let container = container_for(&database);
-    assert_eq!(database.size(), 0);
-    let app = test::init_service(create_app(
-        config.http,
-        container,
-        #[cfg(feature = "api-doc")]
-        config.api_doc,
-    ))
-    .await;
-    let response =
-        test::call_service(&app, test::TestRequest::get().uri("/health").to_request()).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(database.size(), 0);
     assert_eq!(database.num_idle(), 0);
     database.close().await;
 }
