@@ -38,6 +38,12 @@ jobs:
         with:
           tool: taplo@${{ steps.tools.outputs.taplo }}
           fallback: none
+      - name: Report free disk before cache restore
+        # A runner that fills its disk during the restore keeps only this notice.
+        run: |
+          free=$(df -Ph "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')
+          test -n "$free"
+          echo "::notice title=Disk before restore::$free free on the workspace disk"
       - name: Restore optional build cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -53,7 +59,10 @@ jobs:
           key: template-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Makefile', 'scripts/install_actionlint.py') }}
       - name: Report free disk after cache restore
         # Shows cache growth before it fills the disk.
-        run: echo "::notice title=Disk after restore::$(df -Ph "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }') free on the workspace disk"
+        run: |
+          free=$(df -Ph "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')
+          test -n "$free"
+          echo "::notice title=Disk after restore::$free free on the workspace disk"
       - name: Install source verification tools
         run: make ci-tools template-tools
       - name: Validate actual workflow syntax

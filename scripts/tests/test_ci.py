@@ -46,7 +46,7 @@ class CiPolicyTest(unittest.TestCase):
             "types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]", text
         )
         self.assertIn("github.event_name == 'push' || !github.event.pull_request.draft", text)
-        for command in ("make ci-config-check", "make clippy", "make test FEATURES=",
+        for command in ("make ci-config-check", "make clippy", "make test FEATURES=\n",
                         "make test FEATURES=api-doc", "make template-test-fast"):
             self.assertIn(command, text)
         for command in ("make build", "cargo check", "make test-db", "DATABASE_URL"):
@@ -93,23 +93,38 @@ class CiPolicyTest(unittest.TestCase):
             "template-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', "
             "'Cargo.lock', 'Makefile', 'scripts/install_actionlint.py') }}"
         ])
+        # A prefix match would restore the old, larger entries again.
+        self.assertNotIn("restore-keys", validate)
 
-    def test_one_free_disk_notice_follows_cache_restore(self):
+    def test_free_disk_notices_surround_cache_restore(self):
         validate = jobs(self.workflow("template-ci.yml"))["validate"]
         steps = re.split(r"\n(?=      - )", validate)
         restore = next(i for i, step in enumerate(steps) if "uses: actions/cache@" in step)
-        notice = steps[restore + 1]
-        self.assertTrue(notice.startswith("      - name: Report free disk after cache restore\n"))
-        self.assertEqual(sum("::notice" in step for step in steps), 1)
+        # A runner that fills its disk during the restore keeps only the notice before it.
+        notices = {"before": steps[restore - 1], "after": steps[restore + 1]}
+        self.assertEqual(sum("::notice" in step for step in steps), 2)
         self.assertNotIn("disk-report", validate)
-        command = re.search(r"\n        run: (.*)\n?$", notice).group(1)
-        with tempfile.TemporaryDirectory() as workspace:
-            result = subprocess.run(["bash", "-c", command], capture_output=True, text=True,
-                                    env={"PATH": "/usr/bin:/bin", "GITHUB_WORKSPACE": workspace})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stderr, "")
-        self.assertRegex(result.stdout,
-                         r"^::notice title=Disk after restore::\S+ free on the workspace disk\n$")
+        for stage, step in notices.items():
+            with self.subTest(stage=stage):
+                self.assertTrue(step.startswith(f"      - name: Report free disk {stage} cache restore\n"))
+                script = re.search(r"\n        run: \|\n((?:          .*\n?)+)$", step).group(1)
+                script = "".join(line[10:] for line in script.splitlines(keepends=True))
+                with tempfile.TemporaryDirectory() as workspace:
+                    result = self.run_step(script, workspace)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertRegex(
+                    result.stdout,
+                    rf"^::notice title=Disk {stage} restore::\S+ free on the workspace disk\n$",
+                )
+                missing = self.run_step(script, "/nonexistent-workspace")
+                self.assertNotEqual(missing.returncode, 0)
+                self.assertNotIn("::notice", missing.stdout)
+
+    def run_step(self, script, workspace):
+        # GitHub runs a step's script with `bash -e` when the step names no shell.
+        return subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
+                              env={"PATH": "/usr/bin:/bin", "GITHUB_WORKSPACE": workspace})
 
     def test_command_controller_never_checks_out_or_executes_pr_code(self):
         text = self.workflow("ci-command.yml")
