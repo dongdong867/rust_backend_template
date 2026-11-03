@@ -212,7 +212,8 @@ class TemplateChecksTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.write(self.output, ".example.env",
                            "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n" + line)
-                with self.assertRaisesRegex(RuntimeError, "database settings"):
+                with self.assertRaisesRegex(
+                        RuntimeError, r"must list DATABASE_ACQUIRE_TIMEOUT_SECS=10\."):
                     self.check_project()
 
     def test_snapshot_does_not_read_local_settings_or_build_output(self):

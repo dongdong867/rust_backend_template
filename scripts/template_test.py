@@ -160,9 +160,10 @@ def check_project(project, name, include_tasks):
     example = project / ".example.env"
     example_text = example.read_text() if example.is_file() else ""
     require(all(f"{setting}=" in example_text for setting in (
-                "DATABASE_URL", "DATABASE_MAX_CONNECTIONS"))
-            and "DATABASE_ACQUIRE_TIMEOUT_SECS=10" in example_text.splitlines(),
+                "DATABASE_URL", "DATABASE_MAX_CONNECTIONS")),
             "The PostgreSQL database settings were removed.")
+    require("DATABASE_ACQUIRE_TIMEOUT_SECS=10" in example_text.splitlines(),
+            ".example.env must list DATABASE_ACQUIRE_TIMEOUT_SECS=10.")
     require((project / "crates/tasks").is_dir() == include_tasks,
             "The tasks crate does not match the prompt.")
     require((project / "migrations/0001_create_tasks.sql").is_file() == include_tasks,
