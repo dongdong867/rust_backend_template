@@ -46,7 +46,7 @@ class CiPolicyTest(unittest.TestCase):
             "types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]", text
         )
         self.assertIn("github.event_name == 'push' || !github.event.pull_request.draft", text)
-        for command in ("make ci-config-check", "make clippy", "make test FEATURES=",
+        for command in ("make ci-config-check", "make clippy", "make test FEATURES=\n",
                         "make test FEATURES=api-doc", "make template-test-fast"):
             self.assertIn(command, text)
         for command in ("make build", "cargo check", "make test-db", "DATABASE_URL"):
@@ -77,6 +77,54 @@ class CiPolicyTest(unittest.TestCase):
         # Without these, cargo install refuses to overwrite the restored generator binary.
         self.assertIn(".tools/.crates.toml", text)
         self.assertIn(".tools/.crates2.json", text)
+
+    def test_template_build_keeps_its_cache_small(self):
+        validate = jobs(self.workflow("template-ci.yml"))["validate"]
+        settings = validate[:validate.index("    steps:\n")]
+        # Incremental data and full debug info made the restored cache too big for some runners.
+        self.assertIn("    env:\n", settings)
+        env = settings[settings.index("    env:\n"):]
+        self.assertIn('      CARGO_INCREMENTAL: "0"\n', env)
+        self.assertIn("      CARGO_PROFILE_DEV_DEBUG: line-tables-only\n", env)
+
+    def test_cache_key_version_skips_entries_built_before_the_small_cache(self):
+        validate = jobs(self.workflow("template-ci.yml"))["validate"]
+        self.assertEqual(re.findall(r"key: (.*)", validate), [
+            "template-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', "
+            "'Cargo.lock', 'Makefile', 'scripts/install_actionlint.py') }}"
+        ])
+        # A prefix match would restore the old, larger entries again.
+        self.assertNotIn("restore-keys", validate)
+
+    def test_free_disk_notices_surround_cache_restore(self):
+        validate = jobs(self.workflow("template-ci.yml"))["validate"]
+        steps = re.split(r"\n(?=      - )", validate)
+        restore = next(i for i, step in enumerate(steps) if "uses: actions/cache@" in step)
+        # A runner that fills its disk during the restore keeps only the notice before it.
+        notices = {"before": steps[restore - 1], "after": steps[restore + 1]}
+        self.assertEqual(sum("::notice" in step for step in steps), 2)
+        self.assertNotIn("disk-report", validate)
+        for stage, step in notices.items():
+            with self.subTest(stage=stage):
+                self.assertTrue(step.startswith(f"      - name: Report free disk {stage} cache restore\n"))
+                script = re.search(r"\n        run: \|\n((?:          .*\n?)+)$", step).group(1)
+                script = "".join(line[10:] for line in script.splitlines(keepends=True))
+                with tempfile.TemporaryDirectory() as workspace:
+                    result = self.run_step(script, workspace)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertRegex(
+                    result.stdout,
+                    rf"^::notice title=Disk {stage} restore::\S+ free on the workspace disk\n$",
+                )
+                missing = self.run_step(script, "/nonexistent-workspace")
+                self.assertNotEqual(missing.returncode, 0)
+                self.assertNotIn("::notice", missing.stdout)
+
+    def run_step(self, script, workspace):
+        # GitHub runs a step's script with `bash -e` when the step names no shell.
+        return subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
+                              env={"PATH": "/usr/bin:/bin", "GITHUB_WORKSPACE": workspace})
 
     def test_command_controller_never_checks_out_or_executes_pr_code(self):
         text = self.workflow("ci-command.yml")
