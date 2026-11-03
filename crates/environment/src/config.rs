@@ -666,7 +666,7 @@ mod tests {
             load(&[]).unwrap().database.acquire_timeout,
             Duration::from_secs(10)
         );
-        for (value, seconds) in [("1", 1), ("42", 42), ("300", 300)] {
+        for (value, seconds) in [("1", 1), ("+10", 10), ("42", 42), ("300", 300)] {
             assert_eq!(
                 load(&[("DATABASE_ACQUIRE_TIMEOUT_SECS", value)])
                     .unwrap()
@@ -679,7 +679,18 @@ mod tests {
 
     #[test]
     fn database_acquire_timeout_is_whole_seconds_from_1_to_300() {
-        for value in ["0", "-1", "1.5", "", "301", "1000", "soon"] {
+        for value in [
+            "0",
+            "-1",
+            "1.5",
+            "",
+            " 10",
+            "301",
+            "1000",
+            "18446744073709551615",
+            "99999999999999999999",
+            "soon",
+        ] {
             let error = load(&[("DATABASE_ACQUIRE_TIMEOUT_SECS", value)]).unwrap_err();
             assert_eq!(
                 error.to_string(),
