@@ -53,7 +53,7 @@ fn the_closed_port_stays_reserved_while_the_test_holds_it() {
 }
 
 #[actix_web::test]
-async fn the_pool_waits_the_configured_acquire_timeout_and_10_seconds_by_default() {
+async fn the_pool_uses_the_configured_acquire_timeout_and_10_seconds_by_default() {
     for (value, seconds) in [(None, 10), (Some("1"), 1), (Some("300"), 300)] {
         let (config, _port) = closed_port_config(value);
         let database = create_pool(&config.database).unwrap();
