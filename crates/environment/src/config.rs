@@ -123,8 +123,7 @@ fn read_database_config(
             lookup,
             "DATABASE_ACQUIRE_TIMEOUT_SECS",
             Some(DatabaseConfig::DEFAULT_ACQUIRE_TIMEOUT),
-            // Keep the 300 in this message equal to DatabaseConfig::MAX_ACQUIRE_TIMEOUT_SECS.
-            "a positive number of seconds up to 300",
+            DatabaseConfig::ACQUIRE_TIMEOUT_EXPECTED,
             |value| {
                 value
                     .parse()
@@ -698,7 +697,8 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "invalid DATABASE_ACQUIRE_TIMEOUT_SECS: expected a positive number of seconds up to 300, got {value:?}"
+                    "invalid DATABASE_ACQUIRE_TIMEOUT_SECS: expected a positive number of seconds up to {}, got {value:?}",
+                    DatabaseConfig::MAX_ACQUIRE_TIMEOUT_SECS
                 )
             );
         }
