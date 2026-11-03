@@ -158,9 +158,9 @@ def check_project(project, name, include_tasks):
     require((service / "tests/postgres_database.rs").is_file(),
             "The PostgreSQL scaffold smoke check was removed.")
     example = project / ".example.env"
-    require(example.is_file()
-            and "DATABASE_URL=" in example.read_text()
-            and "DATABASE_MAX_CONNECTIONS=" in example.read_text(),
+    example_text = example.read_text() if example.is_file() else ""
+    require(all(f"{setting}=" in example_text for setting in (
+                "DATABASE_URL", "DATABASE_MAX_CONNECTIONS", "DATABASE_ACQUIRE_TIMEOUT_SECS")),
             "The PostgreSQL database settings were removed.")
     require((project / "crates/tasks").is_dir() == include_tasks,
             "The tasks crate does not match the prompt.")
@@ -232,7 +232,8 @@ def check_generated(project, *, fast_only=False, structure_only=False):
     environment = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / "target/template-test"))
     # Keep TEST_DATABASE_URL: it deliberately selects the dedicated test server.
     for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL",
-                    "DATABASE_MAX_CONNECTIONS", "PORT", "RUST_LOG", "LOG_FORMAT",
+                    "DATABASE_MAX_CONNECTIONS", "DATABASE_ACQUIRE_TIMEOUT_SECS",
+                    "PORT", "RUST_LOG", "LOG_FORMAT",
                     "HTTP_CORS_ENABLED", "HTTP_CORS_ALLOWED_ORIGINS",
                     "HTTP_REQUEST_TIMEOUT_SECS", "HTTP_REQUEST_BODY_LIMIT_BYTES"):
         environment.pop(setting, None)

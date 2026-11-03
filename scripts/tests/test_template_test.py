@@ -67,7 +67,8 @@ class TemplateChecksTest(unittest.TestCase):
         for path in template_test.SHARED_CI_FILES:
             self.write(self.output, path, (template_test.ROOT / path).read_text())
         self.write(self.output, "Makefile", "test:\n\tcargo test --locked\ntest-crate:\n\tpython3 helper\n")
-        self.write(self.output, ".example.env", "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n")
+        self.write(self.output, ".example.env", "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n"
+                   "DATABASE_ACQUIRE_TIMEOUT_SECS=10\n")
         self.write(self.output, template_test.WORKFLOW_PROBE, template_test.WORKFLOW_TEXT)
         (self.output / "CLAUDE.md").symlink_to("AGENTS.md")
         if include_tasks:
@@ -93,6 +94,7 @@ class TemplateChecksTest(unittest.TestCase):
                 "API_DOC_USERNAME": "operator",
                 "API_DOC_PASSWORD": "synthetic-inherited-secret",
                 "DATABASE_URL": "synthetic-application-database",
+                "DATABASE_ACQUIRE_TIMEOUT_SECS": "7",
                 "PORT": "4321",
             }):
                 for project in (self.source, self.output):
@@ -105,7 +107,8 @@ class TemplateChecksTest(unittest.TestCase):
                 )
                 for call in run.call_args_list:
                     self.assertTrue(call.kwargs["check"])
-                    for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL", "PORT"):
+                    for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL",
+                                    "DATABASE_ACQUIRE_TIMEOUT_SECS", "PORT"):
                         self.assertFalse(setting in call.kwargs["env"], setting)
                     self.assertEqual(call.kwargs["env"]["CARGO_TARGET_DIR"],
                                      str(template_test.ROOT / "target/template-test"))
@@ -200,6 +203,12 @@ class TemplateChecksTest(unittest.TestCase):
     def test_database_configuration_must_remain(self):
         self.project()
         (self.output / ".example.env").unlink()
+        with self.assertRaisesRegex(RuntimeError, "database settings"):
+            self.check_project()
+
+    def test_database_acquire_timeout_must_be_documented(self):
+        self.project()
+        self.write(self.output, ".example.env", "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n")
         with self.assertRaisesRegex(RuntimeError, "database settings"):
             self.check_project()
 
