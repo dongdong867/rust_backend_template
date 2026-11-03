@@ -208,9 +208,12 @@ class TemplateChecksTest(unittest.TestCase):
 
     def test_database_acquire_timeout_must_be_documented(self):
         self.project()
-        self.write(self.output, ".example.env", "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n")
-        with self.assertRaisesRegex(RuntimeError, "database settings"):
-            self.check_project()
+        for line in ("", "DATABASE_ACQUIRE_TIMEOUT_SECS=30\n", "DATABASE_ACQUIRE_TIMEOUT_SECS=100\n"):
+            with self.subTest(line=line):
+                self.write(self.output, ".example.env",
+                           "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n" + line)
+                with self.assertRaisesRegex(RuntimeError, "database settings"):
+                    self.check_project()
 
     def test_snapshot_does_not_read_local_settings_or_build_output(self):
         self.write(self.source, "Cargo.toml", "manifest\n")
