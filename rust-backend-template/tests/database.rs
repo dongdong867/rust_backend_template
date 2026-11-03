@@ -13,22 +13,25 @@ use rust_backend_template::{
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tasks::framework::storage::PostgresTaskStorageProvider;
+use tokio::net::TcpSocket;
 
-/// Settings whose database address refuses connections, so no PostgreSQL server is contacted.
-fn closed_port_config(acquire_timeout: Option<&str>) -> Config {
-    // Dropping the listener closes the port the system just assigned.
-    let address = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
+/// Settings whose database address has no server, so no PostgreSQL server is contacted.
+///
+/// The returned socket holds the port without listening, so every connection fails
+/// (Linux refuses it; macOS drops it) and nothing else can bind the port while the caller holds it.
+fn closed_port_config(acquire_timeout: Option<&str>) -> (Config, TcpSocket) {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = socket.local_addr().unwrap();
     let url = format!("postgres://closed_probe@{address}/closed_probe");
-    Config::from_lookup(|name| match name {
+    let config = Config::from_lookup(|name| match name {
         "DATABASE_URL" => Some(url.clone()),
         "DATABASE_ACQUIRE_TIMEOUT_SECS" => acquire_timeout.map(str::to_owned),
         "API_DOC_PASSWORD" => Some("documentation-test-password".to_owned()),
         _ => None,
     })
-    .unwrap()
+    .unwrap();
+    (config, socket)
 }
 
 fn postgres_container(database: &PgPool) -> Arc<Container> {
@@ -38,10 +41,22 @@ fn postgres_container(database: &PgPool) -> Arc<Container> {
     }))
 }
 
+#[::core::prelude::v1::test]
+fn the_closed_port_stays_reserved_while_the_test_holds_it() {
+    let (config, _port) = closed_port_config(None);
+    let url = config.database.url.as_str();
+    let address = &url[url.find('@').unwrap() + 1..url.rfind('/').unwrap()];
+    assert!(
+        TcpListener::bind(address).is_err(),
+        "another process could bind {address}"
+    );
+}
+
 #[actix_web::test]
 async fn the_pool_waits_the_configured_acquire_timeout_and_10_seconds_by_default() {
     for (value, seconds) in [(None, 10), (Some("1"), 1), (Some("300"), 300)] {
-        let database = create_pool(&closed_port_config(value).database).unwrap();
+        let (config, _port) = closed_port_config(value);
+        let database = create_pool(&config.database).unwrap();
         assert_eq!(
             database.options().get_acquire_timeout(),
             Duration::from_secs(seconds)
@@ -53,7 +68,8 @@ async fn the_pool_waits_the_configured_acquire_timeout_and_10_seconds_by_default
 
 #[actix_web::test]
 async fn acquiring_from_a_closed_port_times_out_after_the_configured_wait() {
-    let database = create_pool(&closed_port_config(Some("1")).database).unwrap();
+    let (config, _port) = closed_port_config(Some("1"));
+    let database = create_pool(&config.database).unwrap();
     let started = Instant::now();
     let error = database.acquire().await.unwrap_err();
     let elapsed = started.elapsed();
@@ -71,7 +87,7 @@ async fn acquiring_from_a_closed_port_times_out_after_the_configured_wait() {
 
 #[actix_web::test]
 async fn creating_a_task_fails_with_500_after_the_acquire_timeout_when_the_database_is_down() {
-    let config = closed_port_config(Some("1"));
+    let (config, _port) = closed_port_config(Some("1"));
     let database = create_pool(&config.database).unwrap();
     let app = test::init_service(create_app(
         config.http,
@@ -109,7 +125,7 @@ async fn creating_a_task_fails_with_500_after_the_acquire_timeout_when_the_datab
 
 #[actix_web::test]
 async fn health_answers_at_once_when_the_database_port_is_closed() {
-    let config = closed_port_config(None);
+    let (config, _port) = closed_port_config(None);
     let database = create_pool(&config.database).unwrap();
     let app = test::init_service(create_app(
         config.http,
