@@ -123,7 +123,7 @@ fn read_database_config(
             lookup,
             "DATABASE_ACQUIRE_TIMEOUT_SECS",
             Some(DatabaseConfig::DEFAULT_ACQUIRE_TIMEOUT),
-            DatabaseConfig::ACQUIRE_TIMEOUT_EXPECTED,
+            "a positive number of seconds up to 300",
             |value| {
                 value
                     .parse()
