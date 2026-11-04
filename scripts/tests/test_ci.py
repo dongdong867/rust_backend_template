@@ -325,6 +325,13 @@ class CiPolicyTest(unittest.TestCase):
             self.assertIn("For private repositories", text)
             self.assertIn("without write permission", text)
 
+    def test_release_guidance_says_fork_runs_do_not_count(self):
+        for name in ("README.md", "README.md.liquid"):
+            with self.subTest(name=name):
+                text = (ROOT / name).read_text()
+                self.assertIn("A run from a fork pull request does not count, nor do its checks", text)
+                self.assertIn("can leave it waiting for approval", text)
+
     def test_guidance_describes_head_statuses_without_bot_comments(self):
         for name in ("README.md", "README.md.liquid", "docs/ci-commands.md"):
             with self.subTest(name=name):
