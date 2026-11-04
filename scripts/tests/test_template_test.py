@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import shlex
 import subprocess
@@ -71,6 +72,11 @@ class TemplateChecksTest(unittest.TestCase):
                    "DATABASE_ACQUIRE_TIMEOUT_SECS=10\n")
         self.write(self.output, template_test.WORKFLOW_PROBE, template_test.WORKFLOW_TEXT)
         (self.output / "CLAUDE.md").symlink_to("AGENTS.md")
+        self.write(self.output, "Dockerfile",
+                   "RUN cargo build -p generated --bins && cp target/release/generated /out/\n"
+                   'ENTRYPOINT ["/usr/local/bin/generated"]\n')
+        self.write(self.output, "compose.yaml", "  image: generated:local\n")
+        self.write(self.output, "generated/tests/image.rs")
         if include_tasks:
             self.write(self.output, "crates/tasks/Cargo.toml")
             self.write(self.output, "migrations/0001_create_tasks.sql")
@@ -85,6 +91,24 @@ class TemplateChecksTest(unittest.TestCase):
         ]}).encode()
         with patch.object(template_test.subprocess, "check_output", return_value=metadata):
             template_test.check_project(self.output, "generated", include_tasks)
+
+    def test_container_files_must_name_the_generated_service(self):
+        for path, text in (
+            ("Dockerfile", 'ENTRYPOINT ["/usr/local/bin/other"]\n'),
+            ("compose.yaml", "  image: other:local\n"),
+        ):
+            with self.subTest(path=path):
+                shutil.rmtree(self.output)
+                self.project()
+                self.write(self.output, path, text)
+                with self.assertRaisesRegex(RuntimeError, "does not run the generated service"):
+                    self.check_project()
+
+    def test_the_image_check_is_kept(self):
+        self.project()
+        (self.output / "generated/tests/image.rs").unlink()
+        with self.assertRaisesRegex(RuntimeError, "production image check was removed"):
+            self.check_project()
 
     def test_generated_check_matrix(self):
         for fast_only in (False, True):

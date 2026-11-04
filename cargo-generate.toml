@@ -7,6 +7,9 @@ include = [
   "README.md",
   "AGENTS.md",
   ".example.env",
+  "Dockerfile",
+  ".dockerignore",
+  "compose.yaml",
   "rust-backend-template/**",
 ]
 

@@ -193,13 +193,16 @@ impl Stack {
         }
     }
 
-    fn inspect(&self, format: &str) -> Result<String, String> {
+    /// The service container's `docker inspect` record.
+    fn inspect(&self) -> Result<Value, String> {
         let output = Command::new("docker")
-            .args(["inspect", "--format", format])
+            .arg("inspect")
             .arg(self.container()?)
             .output()
             .map_err(|_| "could not run docker inspect")?;
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        let records: Value =
+            serde_json::from_slice(&output.stdout).map_err(|_| "unreadable docker inspect")?;
+        Ok(records[0].clone())
     }
 
     fn wait_for_health(&self) -> Result<(), String> {
@@ -224,7 +227,8 @@ impl Stack {
     }
 
     fn require_non_root_user(&self) -> Result<(), String> {
-        let user = self.inspect("{{.Config.User}}")?;
+        let record = self.inspect()?;
+        let user = record["Config"]["User"].as_str().unwrap_or_default();
         if user.is_empty() || ["root", "0"].contains(&user.split(':').next().unwrap_or("")) {
             Err("the service runs as root".into())
         } else {
@@ -261,8 +265,8 @@ impl Stack {
 
     fn stop_cleanly(&self) -> Result<(), String> {
         self.compose(&["stop", "service"])?;
-        let code = self.inspect("{{.State.ExitCode}}")?;
-        if code == "0" {
+        let code = &self.inspect()?["State"]["ExitCode"];
+        if code == 0 {
             Ok(())
         } else {
             Err(format!(
