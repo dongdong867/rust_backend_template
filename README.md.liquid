@@ -104,7 +104,23 @@ Create returns `201`; get and complete return `200` with the task.
 Completing an already-completed task returns `409`.
 Titles are preserved as submitted and must contain 1–200 Unicode characters, excluding U+0000; invalid titles return `400`.
 
-{% endif %}## Develop
+{% endif %}### Run it in a container
+
+The image holds the service and its migration command on a minimal non-root runtime with no shell.
+Compose runs only the service: PostgreSQL must already be running, and nothing here starts it.
+
+```sh
+make image             # build the production image
+make compose-migrate   # apply migrations from the image
+make compose-up        # start the service; starting it never applies migrations
+make compose-down      # stop and remove the service container
+```
+
+Compose reads `.env`. Inside a container, `localhost` is the container itself, so reach PostgreSQL on this machine as `host.docker.internal`, for example `DATABASE_URL=postgres://<user>@host.docker.internal:5432/<database>`.
+Read the service's logs with `docker compose logs`.
+These targets need Docker with Compose v2; Colima is the tested local runtime.
+
+## Develop
 
 ```sh
 make hooks-install   # check formatting before each commit
@@ -120,6 +136,12 @@ After changing repository SQL, migrations, database types or concurrency behavio
 
 ```sh
 TEST_DATABASE_URL=postgres://localhost/postgres make test-db
+```
+
+After changing the Dockerfile, the Compose file, or how the service starts, check the image against the same server. It needs Docker:
+
+```sh
+TEST_DATABASE_URL=postgres://localhost/postgres make image-check
 ```
 
 Before proposing the complete change for publication, run:
@@ -216,6 +238,7 @@ The run fails before any tag exists when the version is not `X.Y.Z`, `main` has 
 Only GitHub Actions runs from `push` and `pull_request` events count, because manual, comment and scheduled runs report on the `main` head whatever they test. Checks from other apps still count, and `ci-command-state/` bookkeeping statuses do not.
 A cancelled check run does not block, whoever cancelled it, and the run's own lint and tests are the only replacement for it. A cancelled command's `error` status still blocks.
 It then runs `make lint`, `make test` and `make test-db` with default features and `api-doc` on the commit. The database tests use a temporary PostgreSQL that the run starts for itself.
+It then builds the production image and runs `make image-check` against that server, so an image that cannot migrate, serve or stop cleanly stops the release.
 Only the final job, which runs after every check passes, has permission to write.
 Anyone with write access can run the workflow, so it adds no approval beyond repository permissions.
 

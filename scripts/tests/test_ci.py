@@ -342,13 +342,13 @@ class CiPolicyTest(unittest.TestCase):
         # This deliberately fixes the small, plain config shape; it does not parse arbitrary YAML.
         text = (ROOT / ".github/dependabot.yml").read_text()
         self.assertIn("version: 2", text)
-        for ecosystem in ("cargo", "github-actions"):
+        # Docker covers the Dockerfile's pinned base images.
+        for ecosystem in ("cargo", "github-actions", "docker"):
             self.assertIn(f"package-ecosystem: {ecosystem}", text)
-        self.assertEqual(text.count("directory: /"), 2)
-        self.assertEqual(text.count("interval: weekly"), 2)
-        self.assertEqual(text.count("groups:"), 2)
-        self.assertEqual(text.count('patterns: ["*"]'), 2)
-        self.assertNotIn("docker", text)
+        self.assertEqual(text.count("directory: /"), 3)
+        self.assertEqual(text.count("interval: weekly"), 3)
+        self.assertEqual(text.count("groups:"), 3)
+        self.assertEqual(text.count('patterns: ["*"]'), 3)
 
     def test_fork_approval_guidance_distinguishes_private_repositories(self):
         for name in ("README.md", "README.md.liquid"):

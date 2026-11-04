@@ -116,3 +116,4 @@ The service package is the only workspace package with a binary target; only its
 Verification has a read-only token. A release is always the commit the run started on, so one checkout holds both `.github/ci/release.py` and the release commit. `GITHUB_TOKEN` cannot release a commit that differs from `main` in workflow files, so a run stops if `main` has moved.
 Only the publish job has `contents: write`, and it skips dry runs.
 The verify job starts a temporary PostgreSQL and runs the tests listed in `make test-db`, so broken SQL those tests cover stops a release even if nobody ran `make check` by hand. Fast tests, pull request workflows and the pre-commit hook stay database-free.
+It then builds the production image and runs `make image-check`, which starts the image through Compose against the same server. The containers share the runner's network, so the passwordless server stays on 127.0.0.1. Nothing else runs containers.
