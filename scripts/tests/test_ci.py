@@ -18,12 +18,19 @@ template_test = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(template_test)
 
 
-def jobs(text):
-    """Split a workflow's top-level jobs by their two-space keys."""
-    body = text.split("\njobs:\n", 1)[1]
+def blocks(text, heading):
+    """Split one top-level YAML block, such as `jobs:`, by its two-space keys."""
+    body = text.split(f"\n{heading}:\n", 1)[1]
+    # The block ends at the next top-level key.
+    body = re.split(r"^\S", body, maxsplit=1, flags=re.M)[0]
     names = re.findall(r"^  ([\w-]+):$", body, re.M)
     parts = re.split(r"^  [\w-]+:$", body, flags=re.M)[1:]
     return dict(zip(names, parts))
+
+
+def jobs(text):
+    """Split a workflow's top-level jobs by their two-space keys."""
+    return blocks(text, "jobs")
 
 
 class CiPolicyTest(unittest.TestCase):
@@ -412,11 +419,13 @@ class ContainerPolicyTest(unittest.TestCase):
         # The last matching line wins, so the exclusion must follow every re-admitted folder.
         last_admitted = max(index for index, line in enumerate(lines) if line.startswith("!"))
         # Every local settings name .gitignore keeps out of Git stays out of the image too.
+        # Its section runs from the `# Local settings.` heading line to the next blank line.
         ignored = (ROOT / ".gitignore").read_text().split("# Local settings.", 1)[1]
         patterns = [line for line in ignored.split("\n\n", 1)[0].splitlines()[1:]
                     if line and not line.startswith(("!", "#"))]
         self.assertTrue(patterns)
         for pattern in patterns:
+            self.assertIn(f"**/{pattern}", lines, pattern)
             self.assertGreater(lines.index(f"**/{pattern}"), last_admitted, pattern)
 
     def test_the_image_build_refuses_an_out_of_date_lock_file(self):
@@ -430,17 +439,16 @@ class ContainerPolicyTest(unittest.TestCase):
         self.assertEqual(tag.group(1), channel)
 
     def test_compose_serves_only_this_machine_and_outlasts_shutdown(self):
-        compose = (ROOT / "compose.yaml").read_text()
-        self.assertIn("      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}\n", compose)
+        service = blocks((ROOT / "compose.yaml").read_text(), "services")["service"]
+        self.assertIn("      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}\n", service)
         timeout = re.search(r"^pub const SHUTDOWN_TIMEOUT_SECS: u64 = (\d+);$",
                             (ROOT / "rust-backend-template/src/server.rs").read_text(), re.M)
-        grace = re.search(r"^    stop_grace_period: (\d+)s$", compose, re.M)
+        grace = re.search(r"^    stop_grace_period: (\d+)s$", service, re.M)
         # The pool closes after the server's shutdown timeout, so stopping needs more time.
         self.assertGreater(int(grace.group(1)), int(timeout.group(1)))
 
     def test_one_port_sets_the_listener_and_the_published_port(self):
-        compose = (ROOT / "compose.yaml").read_text()
-        service = compose.split("\n  service:\n", 1)[1].split("\n  migrate:\n", 1)[0]
+        service = blocks((ROOT / "compose.yaml").read_text(), "services")["service"]
         # One interpolated PORT sets the listener too, so a shell PORT cannot split the two.
         self.assertIn("    environment:\n      PORT: ${PORT:-8080}\n", service)
 
