@@ -255,6 +255,16 @@ class VerifyTest(unittest.TestCase):
         self.data["check_runs"][MAIN] = [check("Formatting", conclusion="failure", suite=5)]
         self.verify()
 
+    def test_own_failing_runs_still_block_beside_ignored_fork_runs(self):
+        self.data["workflow_runs"][MAIN] = [
+            workflow_run(5, "pull_request", "completed", "failure", "Formatting", head="outsider/service"),
+            workflow_run(6, "pull_request", "completed", "failure", "Template validation"),
+        ]
+        with self.assertRaises(RuntimeError) as raised:
+            self.verify()
+        self.assertIn("Template validation", str(raised.exception))
+        self.assertNotIn("Formatting", str(raised.exception))
+
     def test_own_runs_count_whatever_the_name_case(self):
         self.data["workflow_runs"][MAIN] = [
             workflow_run(5, "pull_request", "completed", "failure", "Formatting", head="Owner/Service"),
@@ -262,15 +272,18 @@ class VerifyTest(unittest.TestCase):
         self.assert_rejected("Formatting")
 
     def test_runs_that_name_no_head_repository_still_count(self):
-        for head in (None, {}, {"full_name": None}, "missing"):
+        for head in (None, {}, {"full_name": None}, "outsider/service"):
             with self.subTest(head=head):
                 run = workflow_run(5, "pull_request", "completed", "failure", "Formatting")
-                if head == "missing":
-                    del run["head_repository"]
-                else:
-                    run["head_repository"] = head
+                run["head_repository"] = head
                 self.data["workflow_runs"][MAIN] = [run]
                 self.assert_rejected("Formatting")
+
+    def test_runs_without_a_head_repository_field_still_count(self):
+        run = workflow_run(5, "pull_request", "completed", "failure", "Formatting")
+        del run["head_repository"]
+        self.data["workflow_runs"][MAIN] = [run]
+        self.assert_rejected("Formatting")
 
     def test_checks_on_later_pages_are_read(self):
         self.data["check_runs"][MAIN] = [check(f"ok-{n}") for n in range(100)] + [
