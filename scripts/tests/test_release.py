@@ -83,9 +83,9 @@ def check(name, status="completed", conclusion="success", suite=1):
     return {"name": name, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
 
 
-def workflow_run(suite, event, status="completed", conclusion="success", name="Workflow"):
+def workflow_run(suite, event, status="completed", conclusion="success", name="Workflow", head=REPO):
     return {"check_suite_id": suite, "event": event, "status": status, "conclusion": conclusion,
-            "name": name, "head_sha": MAIN}
+            "name": name, "head_sha": MAIN, "head_repository": {"full_name": head}}
 
 
 class VerifyTest(unittest.TestCase):
@@ -96,9 +96,10 @@ class VerifyTest(unittest.TestCase):
         release.verify(self.api, REPO, version, sha, RUN, ref, lambda _: packages)
 
     def assert_rejected(self, pattern, **kwargs):
-        with self.assertRaisesRegex(RuntimeError, pattern):
+        with self.assertRaisesRegex(RuntimeError, pattern) as raised:
             self.verify(**kwargs)
         self.assertFalse([c for c in self.data["calls"] if c[0] != "GET"])
+        return raised.exception
 
     def test_the_current_main_head_is_accepted(self):
         self.verify()
@@ -236,6 +237,53 @@ class VerifyTest(unittest.TestCase):
             workflow_run(6, "issue_comment", "completed", "failure"),
         ]
         self.verify()
+
+    def test_fork_runs_awaiting_approval_are_ignored(self):
+        # An outsider's fork PR into any branch can put a run on the main head that never starts.
+        for status, conclusion in (("completed", "action_required"), ("action_required", None),
+                                   ("waiting", None), ("queued", None)):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.data["workflow_runs"][MAIN] = [
+                    workflow_run(5, "pull_request", status, conclusion, "Formatting", head="outsider/service"),
+                ]
+                self.verify()
+
+    def test_failed_fork_runs_and_their_checks_are_ignored(self):
+        # The outsider chooses the base branch, so the result does not describe the main head.
+        self.data["workflow_runs"][MAIN] = [
+            workflow_run(5, "pull_request", "completed", "failure", "Formatting", head="outsider/service"),
+        ]
+        self.data["check_runs"][MAIN] = [check("Formatting", conclusion="failure", suite=5)]
+        self.verify()
+
+    def test_own_failing_runs_still_block_beside_ignored_fork_runs(self):
+        self.data["workflow_runs"][MAIN] = [
+            workflow_run(5, "pull_request", "completed", "failure", "Formatting", head="outsider/service"),
+            workflow_run(6, "pull_request", "completed", "failure", "Template validation"),
+        ]
+        error = self.assert_rejected("Template validation")
+        self.assertNotIn("Formatting", str(error))
+
+    def test_own_runs_count_whatever_the_name_case(self):
+        self.data["workflow_runs"][MAIN] = [
+            workflow_run(5, "pull_request", "completed", "failure", "Formatting", head="Owner/Service"),
+        ]
+        self.assert_rejected("Formatting")
+
+    def test_runs_with_no_readable_head_repository_still_count(self):
+        # A bare string is a malformed value, not a repository object, so it names no repository.
+        for head in (None, {}, {"full_name": None}, "outsider/service"):
+            with self.subTest(head=head):
+                run = workflow_run(5, "pull_request", "completed", "failure", "Formatting")
+                run["head_repository"] = head
+                self.data["workflow_runs"][MAIN] = [run]
+                self.assert_rejected("Formatting")
+
+    def test_runs_without_a_head_repository_field_still_count(self):
+        run = workflow_run(5, "pull_request", "completed", "failure", "Formatting")
+        del run["head_repository"]
+        self.data["workflow_runs"][MAIN] = [run]
+        self.assert_rejected("Formatting")
 
     def test_checks_on_later_pages_are_read(self):
         self.data["check_runs"][MAIN] = [check(f"ok-{n}") for n in range(100)] + [
