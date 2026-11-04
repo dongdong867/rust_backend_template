@@ -4,7 +4,9 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-{% if include_tasks %}use actix_web::http::header::CONTENT_TYPE;
+{% if include_tasks %}use actix_web::body::MessageBody;
+use actix_web::dev::ServiceResponse;
+use actix_web::http::header::CONTENT_TYPE;
 {% endif %}use actix_web::{http::StatusCode, test};
 use environment::{% if include_tasks %}{Config, LogFormat}{% else %}Config{% endif %};
 use {{crate_name}}::{
@@ -88,26 +90,31 @@ async fn acquiring_from_a_closed_port_times_out_after_the_configured_wait() {
     database.close().await;
 }
 
-{% if include_tasks %}#[actix_web::test]
-async fn creating_a_task_fails_with_500_after_the_acquire_timeout_when_the_database_is_down() {
-    let (config, _port) = closed_port_config(Some("1"));
-    let database = create_pool(&config.database).unwrap();
+{% if include_tasks %}/// Sends one task creation request to an app that stores tasks in `database`.
+async fn post_a_task(config: Config, database: &PgPool) -> ServiceResponse<impl MessageBody> {
     let app = test::init_service(create_app(
         config.http,
-        container_for(&database),
+        container_for(database),
         #[cfg(feature = "api-doc")]
         config.api_doc,
     ))
     .await;
-    let started = Instant::now();
-    let response = test::call_service(
+    test::call_service(
         &app,
         test::TestRequest::post()
             .uri("/v1/tasks")
             .set_json(json!({"title": "Write documentation"}))
             .to_request(),
     )
-    .await;
+    .await
+}
+
+#[actix_web::test]
+async fn creating_a_task_fails_with_500_after_the_acquire_timeout_when_the_database_is_down() {
+    let (config, _port) = closed_port_config(Some("1"));
+    let database = create_pool(&config.database).unwrap();
+    let started = Instant::now();
+    let response = post_a_task(config, &database).await;
     let elapsed = started.elapsed();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
@@ -169,21 +176,7 @@ async fn pool_timeout_log_probe() {
     telemetry::init("info", LogFormat::Json);
     let (config, _port) = closed_port_config(Some("1"));
     let database = create_pool(&config.database).unwrap();
-    let app = test::init_service(create_app(
-        config.http,
-        container_for(&database),
-        #[cfg(feature = "api-doc")]
-        config.api_doc,
-    ))
-    .await;
-    let response = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri("/v1/tasks")
-            .set_json(json!({"title": "Write documentation"}))
-            .to_request(),
-    )
-    .await;
+    let response = post_a_task(config, &database).await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     database.close().await;
 }
