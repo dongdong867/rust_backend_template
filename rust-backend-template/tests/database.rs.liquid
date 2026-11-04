@@ -133,15 +133,13 @@ async fn creating_a_task_fails_with_500_after_the_acquire_timeout_when_the_datab
     database.close().await;
 }
 
-#[::core::prelude::v1::test]
-fn a_pool_timeout_logs_its_own_reason_without_connection_details() {
+/// Runs one ignored probe in a fresh process and returns its storage and route log events.
+///
+/// A fresh process isolates tracing's callsite cache. The probe's output must hold no
+/// connection details, SQLx error text or SQL.
+fn probe_failure_logs(probe: &str) -> (Value, Value) {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--ignored",
-            "--exact",
-            "pool_timeout_log_probe",
-            "--nocapture",
-        ])
+        .args(["--ignored", "--exact", probe, "--nocapture"])
         .output()
         .unwrap();
     assert!(
@@ -150,23 +148,45 @@ fn a_pool_timeout_logs_its_own_reason_without_connection_details() {
         String::from_utf8_lossy(&output.stderr)
     );
     let logs = String::from_utf8(output.stdout).unwrap();
-    for detail in ["postgres://", "closed_probe", "timed out"] {
+    for detail in [
+        "postgres://",
+        "closed_probe",
+        "timed out",
+        "closed pool",
+        "INSERT INTO",
+    ] {
         assert!(!logs.contains(detail), "{detail} in {logs}");
     }
     let events: Vec<Value> = logs
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
-    let storage = events
-        .iter()
-        .find(|event| event["message"] == "task persistence failed")
-        .expect("the storage failure must be logged");
+    let find = |message: &str| {
+        events
+            .iter()
+            .find(|event| event["message"] == message)
+            .cloned()
+            .unwrap_or_else(|| panic!("{message} must be logged in {logs}"))
+    };
+    (
+        find("task persistence failed"),
+        find("task operation failed"),
+    )
+}
+
+#[::core::prelude::v1::test]
+fn a_pool_timeout_logs_its_own_reason_without_connection_details() {
+    let (storage, route) = probe_failure_logs("pool_timeout_log_probe");
     assert_eq!(storage["level"], "ERROR");
     assert_eq!(storage["reason"], "pool_timeout");
-    let route = events
-        .iter()
-        .find(|event| event["message"] == "task operation failed")
-        .expect("the route failure must still be logged");
+    assert_eq!(route["reason"], "persistence");
+}
+
+#[::core::prelude::v1::test]
+fn a_closed_pool_logs_no_reason_and_no_error_text() {
+    let (storage, route) = probe_failure_logs("closed_pool_log_probe");
+    assert_eq!(storage["level"], "ERROR");
+    assert!(storage.get("reason").is_none(), "{storage}");
     assert_eq!(route["reason"], "persistence");
 }
 
@@ -179,6 +199,17 @@ async fn pool_timeout_log_probe() {
     let response = post_a_task(config, &database).await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     database.close().await;
+}
+
+#[actix_web::test]
+#[ignore = "invoked by the parent test in a fresh process to isolate tracing's subscriber cache"]
+async fn closed_pool_log_probe() {
+    telemetry::init("info", LogFormat::Json);
+    let (config, _port) = closed_port_config(None);
+    let database = create_pool(&config.database).unwrap();
+    database.close().await;
+    let response = post_a_task(config, &database).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 {% endif %}#[actix_web::test]
