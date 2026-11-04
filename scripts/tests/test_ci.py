@@ -411,9 +411,13 @@ class ContainerPolicyTest(unittest.TestCase):
         self.assertEqual(lines[0], "*")
         # The last matching line wins, so the exclusion must follow every re-admitted folder.
         last_admitted = max(index for index, line in enumerate(lines) if line.startswith("!"))
-        # The same local settings names .gitignore keeps out of Git.
-        for pattern in ("**/.env*", "**/*.env"):
-            self.assertGreater(lines.index(pattern), last_admitted, pattern)
+        # Every local settings name .gitignore keeps out of Git stays out of the image too.
+        ignored = (ROOT / ".gitignore").read_text().split("# Local settings.", 1)[1]
+        patterns = [line for line in ignored.split("\n\n", 1)[0].splitlines()[1:]
+                    if line and not line.startswith(("!", "#"))]
+        self.assertTrue(patterns)
+        for pattern in patterns:
+            self.assertGreater(lines.index(f"**/{pattern}"), last_admitted, pattern)
 
     def test_the_image_build_refuses_an_out_of_date_lock_file(self):
         build = re.search(r"^RUN cargo build .*$", (ROOT / "Dockerfile").read_text(), re.M)
@@ -436,8 +440,9 @@ class ContainerPolicyTest(unittest.TestCase):
 
     def test_one_port_sets_the_listener_and_the_published_port(self):
         compose = (ROOT / "compose.yaml").read_text()
+        service = compose.split("\n  service:\n", 1)[1].split("\n  migrate:\n", 1)[0]
         # One interpolated PORT sets the listener too, so a shell PORT cannot split the two.
-        self.assertIn("    environment:\n      PORT: ${PORT:-8080}\n", compose)
+        self.assertIn("    environment:\n      PORT: ${PORT:-8080}\n", service)
 
     def test_compose_targets_stop_without_a_settings_file(self):
         makefile = (ROOT / "Makefile").read_text()
