@@ -1,0 +1,31 @@
+# Runs only the service image against an existing PostgreSQL; Compose never starts a database.
+# `make compose-up` starts it, `make compose-migrate` applies migrations, `make compose-down` stops it.
+# Inside a container, localhost is the container: reach PostgreSQL on this machine as host.docker.internal.
+name: rust-backend-template
+
+x-service: &service
+  image: rust-backend-template:local
+  build: .
+  env_file:
+    - path: ${SERVICE_ENV_FILE:-.env}
+      required: false
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
+services:
+  service:
+    <<: *service
+    # One interpolated PORT sets both the listener and the published port.
+    environment:
+      PORT: ${PORT:-8080}
+    ports:
+      # Only this machine can reach the service, which writes to a real database.
+      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}
+    # Longer than the server's 30-second shutdown timeout, so the pool closes before SIGKILL.
+    stop_grace_period: 40s
+
+  # Runs only when asked: starting the service never applies migrations.
+  migrate:
+    <<: *service
+    entrypoint: ["/usr/local/bin/migrate"]
+    profiles: [migrate]

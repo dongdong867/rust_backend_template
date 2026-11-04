@@ -79,6 +79,8 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
         run: make test-db FEATURES=api-doc
+      - name: Build the production image
+        run: make image FEATURES=
 
   publish:
     name: Create tag and release

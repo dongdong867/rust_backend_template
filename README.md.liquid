@@ -90,6 +90,30 @@ The default `sslmode=prefer` permits plaintext fallback; it does not require enc
 When putting a URL with `&` query separators in a shell-loaded `.env`, quote the complete value.
 Supply real credentials through the deployment environment or an ignored local file, never committed examples.
 
+### Run it in a container
+
+The image holds the service and its migration command on a minimal non-root runtime with no shell.
+Compose runs only the service: PostgreSQL must already be running, and nothing here starts it.
+
+```sh
+make image             # build the production image
+make compose-migrate   # apply migrations from the image
+make compose-up        # start the service; starting it never applies migrations
+make compose-down      # stop and remove the service container
+```
+
+Compose reads `.env`, or the file `SERVICE_ENV_FILE` names; `compose-up` and `compose-migrate` stop when that file is missing.
+An exported shell `PORT` overrides that file's `PORT`, both for the port the service listens on and for the published port.
+Inside a container, `localhost` is the container itself, so reach PostgreSQL on this machine as `host.docker.internal`, for example `DATABASE_URL=postgres://<user>@host.docker.internal:5432/<database>`.
+`make run` needs `localhost`, so keep the container's settings in a second file, which Git and the image both ignore:
+
+```sh
+SERVICE_ENV_FILE=.env.container make compose-up
+```
+
+The service accepts connections only from this machine. Read its logs with `docker compose logs`.
+These targets need Docker with Compose 2.24.0 or later; Colima is the tested local runtime.
+
 {% if include_tasks %}## Tasks example
 
 ```sh
@@ -121,6 +145,8 @@ After changing repository SQL, migrations, database types or concurrency behavio
 ```sh
 TEST_DATABASE_URL=postgres://localhost/postgres make test-db
 ```
+
+After changing the Dockerfile, `.dockerignore`, the Compose file or how the service starts, build and run the image with the container targets above. They need Docker. No automated check starts the image.
 
 Before proposing the complete change for publication, run:
 
@@ -217,6 +243,7 @@ Only GitHub Actions runs from `push` and `pull_request` events count, because ma
 A run from a fork pull request does not count, nor do its checks, because the fork's author chooses what it tests and can leave it waiting for approval.
 A cancelled check run does not block, whoever cancelled it, and the run's own lint and tests are the only replacement for it. A cancelled command's `error` status still blocks.
 It then runs `make lint`, `make test` and `make test-db` with default features and `api-doc` on the commit. The database tests use a temporary PostgreSQL that the run starts for itself.
+It then runs `make image`, so a Dockerfile that no longer builds stops the release. The release never starts the image.
 Only the final job, which runs after every check passes, has permission to write.
 Anyone with write access can run the workflow, so it adds no approval beyond repository permissions.
 

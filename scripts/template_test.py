@@ -163,6 +163,12 @@ def check_project(project, name, include_tasks):
     require((service / "tests/database_tls.rs").is_file(), "Generic TLS coverage was removed.")
     require((service / "tests/postgres_database.rs").is_file(),
             "The PostgreSQL scaffold smoke check was removed.")
+    dockerfile = (project / "Dockerfile").read_text() if (project / "Dockerfile").is_file() else ""
+    compose = (project / "compose.yaml").read_text() if (project / "compose.yaml").is_file() else ""
+    require(f"target/release/{name} " in dockerfile
+            and f'ENTRYPOINT ["/usr/local/bin/{name}"]' in dockerfile
+            and f"  image: {name}:local\n" in compose,
+            "The Dockerfile or Compose file does not run the generated service.")
     example = project / ".example.env"
     example_text = example.read_text() if example.is_file() else ""
     require(all(f"{setting}=" in example_text for setting in (

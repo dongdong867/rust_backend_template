@@ -14,3 +14,13 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      docker-images:
+        patterns: ["*"]
+    # rust-toolchain.toml decides the build's Rust; bump the Dockerfile's rust tag with it.
+    ignore:
+      - dependency-name: rust

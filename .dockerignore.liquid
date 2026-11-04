@@ -1,0 +1,14 @@
+# Only what the build needs enters the context, so a docs or CI edit does not rebuild the image.
+# Local settings, build output and tooling never enter it; the last matching line wins,
+# so the local settings exclusions follow every re-admitted folder.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
+!{{project-name}}/
+!migrations/
+**/*.liquid
+**/tests/
+**/.env*
+**/*.env

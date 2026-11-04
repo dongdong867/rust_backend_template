@@ -1,6 +1,7 @@
 """Policy guards, not a YAML parser: actionlint validates the actual workflows."""
 
 import importlib.util
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -17,12 +18,19 @@ template_test = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(template_test)
 
 
-def jobs(text):
-    """Split a workflow's top-level jobs by their two-space keys."""
-    body = text.split("\njobs:\n", 1)[1]
+def blocks(text, heading):
+    """Split one top-level YAML block, such as `jobs:`, by its two-space keys."""
+    body = text.split(f"\n{heading}:\n", 1)[1]
+    # The block ends at the next top-level key.
+    body = re.split(r"^\S", body, maxsplit=1, flags=re.M)[0]
     names = re.findall(r"^  ([\w-]+):$", body, re.M)
     parts = re.split(r"^  [\w-]+:$", body, flags=re.M)[1:]
     return dict(zip(names, parts))
+
+
+def jobs(text):
+    """Split a workflow's top-level jobs by their two-space keys."""
+    return blocks(text, "jobs")
 
 
 class CiPolicyTest(unittest.TestCase):
@@ -273,6 +281,35 @@ class CiPolicyTest(unittest.TestCase):
         for forbidden in ("services:", "test-db", "TEST_DATABASE_URL"):
             self.assertNotIn(forbidden, publish)
 
+    def test_release_builds_the_image_after_the_database_tests(self):
+        sections = jobs(self.workflow("release.yml"))
+        verify, publish = sections["verify"], sections["publish"]
+        step = verify.split("- name: Build the production image\n", 1)[1].split("\n      - name:", 1)[0]
+        # Only a build: no container runs, so the step needs no database.
+        self.assertEqual(step.strip(), "run: make image FEATURES=")
+        for target in ("make test-db FEATURES=\n", "make test-db FEATURES=api-doc"):
+            self.assertLess(verify.index(target), verify.index("make image"))
+        for forbidden in ("make image", "docker", "compose"):
+            self.assertNotIn(forbidden, publish)
+
+    def test_only_the_release_workflow_builds_images(self):
+        names = {path.name for path in (ROOT / ".github/workflows").glob("*.yml")}
+        for name in names - {"release.yml"}:
+            text = self.workflow(name)
+            for forbidden in ("docker", "compose", "make image"):
+                self.assertNotIn(forbidden, text, name)
+        release = self.workflow("release.yml")
+        for forbidden in ("docker", "compose"):
+            self.assertNotIn(forbidden, release)
+        hook = (ROOT / ".githooks/pre-commit").read_text()
+        recipe = subprocess.run(
+            ["make", "--no-print-directory", "-n", "test"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+        for text in (hook, recipe):
+            for forbidden in ("docker", "compose"):
+                self.assertNotIn(forbidden, text)
+
     def test_only_the_release_workflow_starts_postgres(self):
         names = {path.name for path in (ROOT / ".github/workflows").glob("*.yml")}
         self.assertIn("release.yml", names)
@@ -310,13 +347,16 @@ class CiPolicyTest(unittest.TestCase):
         # This deliberately fixes the small, plain config shape; it does not parse arbitrary YAML.
         text = (ROOT / ".github/dependabot.yml").read_text()
         self.assertIn("version: 2", text)
-        for ecosystem in ("cargo", "github-actions"):
+        # Docker covers the Dockerfile's pinned base images.
+        for ecosystem in ("cargo", "github-actions", "docker"):
             self.assertIn(f"package-ecosystem: {ecosystem}", text)
-        self.assertEqual(text.count("directory: /"), 2)
-        self.assertEqual(text.count("interval: weekly"), 2)
-        self.assertEqual(text.count("groups:"), 2)
-        self.assertEqual(text.count('patterns: ["*"]'), 2)
-        self.assertNotIn("docker", text)
+        self.assertEqual(text.count("directory: /"), 3)
+        self.assertEqual(text.count("interval: weekly"), 3)
+        self.assertEqual(text.count("groups:"), 3)
+        self.assertEqual(text.count('patterns: ["*"]'), 3)
+        # rust-toolchain.toml decides the build's Rust, so the image tag moves only with it.
+        docker = text.split("package-ecosystem: docker\n", 1)[1]
+        self.assertIn("    ignore:\n      - dependency-name: rust\n", docker)
 
     def test_fork_approval_guidance_distinguishes_private_repositories(self):
         for name in ("README.md", "README.md.liquid"):
@@ -374,6 +414,73 @@ class CiPolicyTest(unittest.TestCase):
         )
         self.assertIn("python3 scripts/template_test.py --fast-only", text)
         self.assertNotIn("test-db", text)
+
+
+class ContainerPolicyTest(unittest.TestCase):
+    """Source files only: the template twin check proves each .liquid twin renders to them."""
+
+    def test_no_local_settings_enter_the_build_context(self):
+        lines = [line for line in (ROOT / ".dockerignore").read_text().splitlines()
+                 if line and not line.startswith("#")]
+        self.assertEqual(lines[0], "*")
+        # The last matching line wins, so the exclusion must follow every re-admitted folder.
+        last_admitted = max(index for index, line in enumerate(lines) if line.startswith("!"))
+        # Every local settings name .gitignore keeps out of Git stays out of the image too.
+        # Its section runs from the `# Local settings.` heading line to the next blank line.
+        ignored = (ROOT / ".gitignore").read_text().split("# Local settings.", 1)[1]
+        patterns = [line for line in ignored.split("\n\n", 1)[0].splitlines()[1:]
+                    if line and not line.startswith(("!", "#"))]
+        self.assertTrue(patterns)
+        for pattern in patterns:
+            self.assertIn(f"**/{pattern}", lines, pattern)
+            self.assertGreater(lines.index(f"**/{pattern}"), last_admitted, pattern)
+
+    def test_the_image_build_refuses_an_out_of_date_lock_file(self):
+        build = re.search(r"^RUN cargo build .*$", (ROOT / "Dockerfile").read_text(), re.M)
+        self.assertIn(" --locked ", build.group(0))
+
+    def test_the_image_builds_with_the_pinned_toolchain(self):
+        channel = re.search(r'^channel = "([^"]+)"$',
+                            (ROOT / "rust-toolchain.toml").read_text(), re.M).group(1)
+        tag = re.search(r"^FROM rust:(\d+\.\d+\.\d+)-", (ROOT / "Dockerfile").read_text(), re.M)
+        self.assertEqual(tag.group(1), channel)
+
+    def test_compose_serves_only_this_machine_and_outlasts_shutdown(self):
+        service = blocks((ROOT / "compose.yaml").read_text(), "services")["service"]
+        self.assertIn("      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}\n", service)
+        timeout = re.search(r"^pub const SHUTDOWN_TIMEOUT_SECS: u64 = (\d+);$",
+                            (ROOT / "rust-backend-template/src/server.rs").read_text(), re.M)
+        grace = re.search(r"^    stop_grace_period: (\d+)s$", service, re.M)
+        # The pool closes after the server's shutdown timeout, so stopping needs more time.
+        self.assertGreater(int(grace.group(1)), int(timeout.group(1)))
+
+    def test_one_port_sets_the_listener_and_the_published_port(self):
+        service = blocks((ROOT / "compose.yaml").read_text(), "services")["service"]
+        # One interpolated PORT sets the listener too, so a shell PORT cannot split the two.
+        self.assertIn("    environment:\n      PORT: ${PORT:-8080}\n", service)
+
+    def test_compose_targets_stop_without_a_settings_file(self):
+        makefile = (ROOT / "Makefile").read_text()
+        for target in ("compose-up", "compose-migrate"):
+            self.assertRegex(makefile, rf"(?m)^{target}: compose-settings image ##")
+        # The settings file fills ${PORT} unless the shell sets it.
+        settings = '--env-file "$${SERVICE_ENV_FILE:-.env}"'
+        self.assertIn(f"\tdocker compose {settings} up --detach --no-build --wait\n", makefile)
+        self.assertIn(f"\tdocker compose {settings} run --rm migrate\n", makefile)
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Path(directory) / ".env.container"
+            missing = self.compose_settings(settings)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn(f"{settings} is missing", missing.stderr)
+            settings.write_text("DATABASE_URL=postgres://synthetic@host.docker.internal/db\n")
+            self.assertEqual(self.compose_settings(settings).returncode, 0)
+
+    def compose_settings(self, settings):
+        return subprocess.run(
+            ["make", "--no-print-directory", "compose-settings"],
+            cwd=ROOT, capture_output=True, text=True,
+            env={"PATH": os.environ["PATH"], "SERVICE_ENV_FILE": str(settings)},
+        )
 
 
 class GeneratedCiTest(unittest.TestCase):
