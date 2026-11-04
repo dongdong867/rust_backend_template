@@ -428,13 +428,16 @@ class ContainerPolicyTest(unittest.TestCase):
     def test_compose_serves_only_this_machine_and_outlasts_shutdown(self):
         compose = (ROOT / "compose.yaml").read_text()
         self.assertIn("      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}\n", compose)
-        # One interpolated PORT sets the listener too, so a shell PORT cannot split the two.
-        self.assertIn("    environment:\n      PORT: ${PORT:-8080}\n", compose)
         timeout = re.search(r"^pub const SHUTDOWN_TIMEOUT_SECS: u64 = (\d+);$",
                             (ROOT / "rust-backend-template/src/server.rs").read_text(), re.M)
         grace = re.search(r"^    stop_grace_period: (\d+)s$", compose, re.M)
         # The pool closes after the server's shutdown timeout, so stopping needs more time.
         self.assertGreater(int(grace.group(1)), int(timeout.group(1)))
+
+    def test_one_port_sets_the_listener_and_the_published_port(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        # One interpolated PORT sets the listener too, so a shell PORT cannot split the two.
+        self.assertIn("    environment:\n      PORT: ${PORT:-8080}\n", compose)
 
     def test_compose_targets_stop_without_a_settings_file(self):
         makefile = (ROOT / "Makefile").read_text()
