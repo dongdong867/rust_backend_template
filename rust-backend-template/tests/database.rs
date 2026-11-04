@@ -174,9 +174,25 @@ fn probe_failure_logs(probe: &str) -> (Value, Value) {
     )
 }
 
+/// The sorted field names of one log event, so a test fails on any extra field, such as an error.
+fn field_names(event: &Value) -> Vec<&str> {
+    let mut names: Vec<&str> = event
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
 #[::core::prelude::v1::test]
 fn a_pool_timeout_logs_its_own_reason_without_connection_details() {
     let (storage, route) = probe_failure_logs("pool_timeout_log_probe");
+    assert_eq!(
+        field_names(&storage),
+        ["level", "message", "reason", "span", "target", "timestamp"]
+    );
     assert_eq!(storage["level"], "ERROR");
     assert_eq!(storage["reason"], "pool_timeout");
     assert_eq!(route["reason"], "persistence");
@@ -185,8 +201,11 @@ fn a_pool_timeout_logs_its_own_reason_without_connection_details() {
 #[::core::prelude::v1::test]
 fn a_closed_pool_logs_no_reason_and_no_error_text() {
     let (storage, route) = probe_failure_logs("closed_pool_log_probe");
+    assert_eq!(
+        field_names(&storage),
+        ["level", "message", "span", "target", "timestamp"]
+    );
     assert_eq!(storage["level"], "ERROR");
-    assert!(storage.get("reason").is_none(), "{storage}");
     assert_eq!(route["reason"], "persistence");
 }
 
