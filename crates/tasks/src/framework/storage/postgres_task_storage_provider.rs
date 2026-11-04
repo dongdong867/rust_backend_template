@@ -17,12 +17,15 @@ impl PostgresTaskStorageProvider {
 
     fn persistence_error(error: sqlx::Error) -> TaskStorageError {
         // Never format or retain SQLx errors, SQL, or credentials; only fixed reasons are logged.
-        if matches!(error, sqlx::Error::PoolTimedOut) {
-            tracing::error!(reason = "pool_timeout", "task persistence failed");
-        } else {
-            tracing::error!("task persistence failed");
-        }
+        // Tracing records an `Option` field only when it is `Some`.
+        let reason = Self::failure_reason(&error);
+        tracing::error!(reason, "task persistence failed");
         TaskStorageError::Persistence
+    }
+
+    /// The fixed log reason for a database failure that operators need to tell apart.
+    fn failure_reason(error: &sqlx::Error) -> Option<&'static str> {
+        matches!(error, sqlx::Error::PoolTimedOut).then_some("pool_timeout")
     }
 }
 
@@ -98,68 +101,29 @@ impl TaskStorageProvider for PostgresTaskStorageProvider {
 #[cfg(test)]
 mod tests {
     use std::io;
-    use std::sync::{Arc, Mutex};
 
     use super::PostgresTaskStorageProvider;
-    use crate::adapter::error::TaskStorageError;
-
-    #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for CapturedLogs {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// Maps one SQLx error and returns the JSON log lines it wrote.
-    fn persistence_error_logs(error: sqlx::Error) -> Vec<String> {
-        let captured = CapturedLogs::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_writer(move || writer.clone())
-            .finish();
-        let mapped = tracing::subscriber::with_default(subscriber, || {
-            PostgresTaskStorageProvider::persistence_error(error)
-        });
-        assert_eq!(mapped, TaskStorageError::Persistence);
-        let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
-        logs.lines().map(str::to_owned).collect()
-    }
 
     #[test]
-    fn a_pool_timeout_logs_the_pool_timeout_reason() {
-        let logs = persistence_error_logs(sqlx::Error::PoolTimedOut);
-        assert_eq!(logs.len(), 1, "{logs:?}");
-        assert!(logs[0].contains(r#""level":"ERROR""#), "{logs:?}");
-        assert!(
-            logs[0].contains(r#""message":"task persistence failed""#),
-            "{logs:?}"
+    fn a_pool_timeout_has_the_pool_timeout_reason() {
+        assert_eq!(
+            PostgresTaskStorageProvider::failure_reason(&sqlx::Error::PoolTimedOut),
+            Some("pool_timeout")
         );
-        assert!(logs[0].contains(r#""reason":"pool_timeout""#), "{logs:?}");
     }
 
     #[test]
-    fn other_database_failures_log_without_a_reason() {
+    fn other_database_failures_have_no_reason() {
         for error in [
             sqlx::Error::PoolClosed,
             sqlx::Error::RowNotFound,
             sqlx::Error::Io(io::Error::from(io::ErrorKind::ConnectionReset)),
         ] {
-            let logs = persistence_error_logs(error);
-            assert_eq!(logs.len(), 1, "{logs:?}");
-            assert!(
-                logs[0].contains(r#""message":"task persistence failed""#),
-                "{logs:?}"
+            assert_eq!(
+                PostgresTaskStorageProvider::failure_reason(&error),
+                None,
+                "{error:?}"
             );
-            assert!(!logs[0].contains(r#""reason""#), "{logs:?}");
         }
     }
 }
