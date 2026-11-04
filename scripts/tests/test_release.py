@@ -96,9 +96,10 @@ class VerifyTest(unittest.TestCase):
         release.verify(self.api, REPO, version, sha, RUN, ref, lambda _: packages)
 
     def assert_rejected(self, pattern, **kwargs):
-        with self.assertRaisesRegex(RuntimeError, pattern):
+        with self.assertRaisesRegex(RuntimeError, pattern) as raised:
             self.verify(**kwargs)
         self.assertFalse([c for c in self.data["calls"] if c[0] != "GET"])
+        return raised.exception
 
     def test_the_current_main_head_is_accepted(self):
         self.verify()
@@ -260,10 +261,8 @@ class VerifyTest(unittest.TestCase):
             workflow_run(5, "pull_request", "completed", "failure", "Formatting", head="outsider/service"),
             workflow_run(6, "pull_request", "completed", "failure", "Template validation"),
         ]
-        with self.assertRaises(RuntimeError) as raised:
-            self.verify()
-        self.assertIn("Template validation", str(raised.exception))
-        self.assertNotIn("Formatting", str(raised.exception))
+        error = self.assert_rejected("Template validation")
+        self.assertNotIn("Formatting", str(error))
 
     def test_own_runs_count_whatever_the_name_case(self):
         self.data["workflow_runs"][MAIN] = [
@@ -271,7 +270,8 @@ class VerifyTest(unittest.TestCase):
         ]
         self.assert_rejected("Formatting")
 
-    def test_runs_that_name_no_head_repository_still_count(self):
+    def test_runs_with_no_readable_head_repository_still_count(self):
+        # A bare string is a malformed value, not a repository object, so it names no repository.
         for head in (None, {}, {"full_name": None}, "outsider/service"):
             with self.subTest(head=head):
                 run = workflow_run(5, "pull_request", "completed", "failure", "Formatting")
