@@ -1,0 +1,11 @@
+# Only what the build needs enters the context, so a docs or CI edit does not rebuild the image.
+# Local settings, build output and tooling never enter it.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
+!rust-backend-template/
+!migrations/
+**/*.liquid
+**/tests/

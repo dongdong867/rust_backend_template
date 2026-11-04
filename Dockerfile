@@ -1,0 +1,17 @@
+# Builds the service and its migration command, then runs them on a minimal non-root runtime.
+# The image never contains or starts PostgreSQL; DATABASE_URL names an existing server.
+FROM rust:1.98.1-slim-trixie@sha256:4cd829461bd5c4d511c32e269da9cb8929223b666519d8004e35fc8d1d771ab7 AS build
+ARG FEATURES=
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --release -p rust-backend-template --bins \
+        ${FEATURES:+--features "$FEATURES"} \
+    && mkdir /out \
+    && cp target/release/rust-backend-template target/release/migrate /out/
+
+# Distroless cc: the C runtime and CA certificates only, with no shell or package manager.
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1
+COPY --from=build /out/ /usr/local/bin/
+USER nonroot
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/rust-backend-template"]
