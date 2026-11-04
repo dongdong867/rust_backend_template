@@ -266,12 +266,44 @@ class CiPolicyTest(unittest.TestCase):
         # The temporary server accepts connections without a password, so only this runner reaches it.
         self.assertIn("- 127.0.0.1:5432:5432\n", verify)
         self.assertIn("--health-cmd", verify)
-        self.assertEqual(verify.count("TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n"), 2)
+        # Two database test steps and the image check share the temporary server.
+        self.assertEqual(verify.count("TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n"), 3)
         last_fast_test = verify.index("make test FEATURES=api-doc")
         for target in ("make test-db FEATURES=\n", "make test-db FEATURES=api-doc"):
             self.assertLess(last_fast_test, verify.index(target))
         for forbidden in ("services:", "test-db", "TEST_DATABASE_URL"):
             self.assertNotIn(forbidden, publish)
+
+    def test_release_checks_the_image_after_the_database_tests(self):
+        sections = jobs(self.workflow("release.yml"))
+        verify, publish = sections["verify"], sections["publish"]
+        step = verify.split("- name: Production image check\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("run: make image-check FEATURES=\n", step)
+        # The temporary server listens only on the runner, so the containers share its network.
+        self.assertIn("COMPOSE_FILE: compose.yaml:.github/ci/compose.host-network.yaml\n", step)
+        self.assertIn("IMAGE_CHECK_DATABASE_HOST: 127.0.0.1\n", step)
+        self.assertIn("TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n", step)
+        for target in ("make test-db FEATURES=\n", "make test-db FEATURES=api-doc"):
+            self.assertLess(verify.index(target), verify.index("make image-check"))
+        self.assertNotIn("image-check", publish)
+        override = (ROOT / ".github/ci/compose.host-network.yaml").read_text()
+        self.assertEqual(override.count("network_mode: host"), 2)
+        self.assertIn(".github/ci/compose.host-network.yaml", template_test.SHARED_CI_FILES)
+
+    def test_only_the_release_workflow_runs_containers(self):
+        names = {path.name for path in (ROOT / ".github/workflows").glob("*.yml")}
+        for name in names - {"release.yml"}:
+            text = self.workflow(name)
+            for forbidden in ("docker", "compose", "image-check", "make image"):
+                self.assertNotIn(forbidden, text, name)
+        hook = (ROOT / ".githooks/pre-commit").read_text()
+        recipe = subprocess.run(
+            ["make", "--no-print-directory", "-n", "test"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+        for text in (hook, recipe):
+            for forbidden in ("docker", "compose", "image-check"):
+                self.assertNotIn(forbidden, text)
 
     def test_only_the_release_workflow_starts_postgres(self):
         names = {path.name for path in (ROOT / ".github/workflows").glob("*.yml")}
@@ -380,6 +412,7 @@ class GeneratedCiTest(unittest.TestCase):
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
             ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
+            ".github/ci/compose.host-network.yaml",
         )
         for name in self.files:
             for root in (self.source, self.project):
