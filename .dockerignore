@@ -11,3 +11,4 @@
 **/*.liquid
 **/tests/
 **/.env*
+**/*.env

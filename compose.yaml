@@ -15,6 +15,9 @@ x-service: &service
 services:
   service:
     <<: *service
+    # One interpolated PORT sets both the listener and the published port.
+    environment:
+      PORT: ${PORT:-8080}
     ports:
       # Only this machine can reach the service, which writes to a real database.
       - 127.0.0.1:${PORT:-8080}:${PORT:-8080}

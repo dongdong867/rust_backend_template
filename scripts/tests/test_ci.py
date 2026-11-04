@@ -411,7 +411,13 @@ class ContainerPolicyTest(unittest.TestCase):
         self.assertEqual(lines[0], "*")
         # The last matching line wins, so the exclusion must follow every re-admitted folder.
         last_admitted = max(index for index, line in enumerate(lines) if line.startswith("!"))
-        self.assertGreater(lines.index("**/.env*"), last_admitted)
+        # The same local settings names .gitignore keeps out of Git.
+        for pattern in ("**/.env*", "**/*.env"):
+            self.assertGreater(lines.index(pattern), last_admitted, pattern)
+
+    def test_the_image_build_refuses_an_out_of_date_lock_file(self):
+        build = re.search(r"^RUN cargo build .*$", (ROOT / "Dockerfile").read_text(), re.M)
+        self.assertIn(" --locked ", build.group(0))
 
     def test_the_image_builds_with_the_pinned_toolchain(self):
         channel = re.search(r'^channel = "([^"]+)"$',
@@ -422,6 +428,8 @@ class ContainerPolicyTest(unittest.TestCase):
     def test_compose_serves_only_this_machine_and_outlasts_shutdown(self):
         compose = (ROOT / "compose.yaml").read_text()
         self.assertIn("      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}\n", compose)
+        # One interpolated PORT sets the listener too, so a shell PORT cannot split the two.
+        self.assertIn("    environment:\n      PORT: ${PORT:-8080}\n", compose)
         timeout = re.search(r"^pub const SHUTDOWN_TIMEOUT_SECS: u64 = (\d+);$",
                             (ROOT / "rust-backend-template/src/server.rs").read_text(), re.M)
         grace = re.search(r"^    stop_grace_period: (\d+)s$", compose, re.M)
@@ -432,7 +440,7 @@ class ContainerPolicyTest(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text()
         for target in ("compose-up", "compose-migrate"):
             self.assertRegex(makefile, rf"(?m)^{target}: compose-settings image ##")
-        # The same file sets the container's PORT and fills ${PORT} in the published port.
+        # The settings file fills ${PORT} unless the shell sets it.
         settings = '--env-file "$${SERVICE_ENV_FILE:-.env}"'
         self.assertIn(f"\tdocker compose {settings} up --detach --no-build --wait\n", makefile)
         self.assertIn(f"\tdocker compose {settings} run --rm migrate\n", makefile)

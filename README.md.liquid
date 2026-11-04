@@ -145,7 +145,7 @@ After changing repository SQL, migrations, database types or concurrency behavio
 TEST_DATABASE_URL=postgres://localhost/postgres make test-db
 ```
 
-After changing the Dockerfile, `.dockerignore` or the Compose file, build and run the image with the container targets above. They need Docker. No automated check starts the image.
+After changing the Dockerfile, `.dockerignore`, the Compose file or how the service starts, build and run the image with the container targets above. They need Docker. No automated check starts the image.
 
 Before proposing the complete change for publication, run:
 

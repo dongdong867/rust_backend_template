@@ -14,7 +14,7 @@ Run `make check` on the complete publication candidate; it includes lint, fast t
 Database tests require `TEST_DATABASE_URL` pointing to an already-running dedicated test server with permission to create isolated databases.
 Never start PostgreSQL automatically on a developer machine or add database tests to the pre-commit hook.
 Only the release workflow starts PostgreSQL, a temporary server for `make test-db`.
-After changing the Dockerfile, `.dockerignore` or the Compose file, run `make image` and the Compose targets by hand; they need Docker. The release builds the image and never runs it.
+After changing the Dockerfile, `.dockerignore`, the Compose file or how the service starts, run `make image` and the Compose targets by hand; they need Docker. The release builds the image and never runs it.
 The image and Compose never start PostgreSQL, and starting the service never applies migrations.
 When a feature adds PostgreSQL tests, add its test binary to the `test-db` target, or a release will not run them.
 
