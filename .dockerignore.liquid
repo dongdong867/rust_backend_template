@@ -1,5 +1,6 @@
 # Only what the build needs enters the context, so a docs or CI edit does not rebuild the image.
-# Local settings, build output and tooling never enter it.
+# Local settings, build output and tooling never enter it; the last matching line wins,
+# so the .env exclusion follows every re-admitted folder.
 *
 !Cargo.toml
 !Cargo.lock
@@ -9,3 +10,4 @@
 !migrations/
 **/*.liquid
 **/tests/
+**/.env*

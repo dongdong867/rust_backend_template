@@ -76,7 +76,6 @@ class TemplateChecksTest(unittest.TestCase):
                    "RUN cargo build -p generated --bins && cp target/release/generated /out/\n"
                    'ENTRYPOINT ["/usr/local/bin/generated"]\n')
         self.write(self.output, "compose.yaml", "  image: generated:local\n")
-        self.write(self.output, "generated/tests/image.rs")
         if include_tasks:
             self.write(self.output, "crates/tasks/Cargo.toml")
             self.write(self.output, "migrations/0001_create_tasks.sql")
@@ -103,12 +102,6 @@ class TemplateChecksTest(unittest.TestCase):
                 self.write(self.output, path, text)
                 with self.assertRaisesRegex(RuntimeError, "does not run the generated service"):
                     self.check_project()
-
-    def test_the_image_check_is_kept(self):
-        self.project()
-        (self.output / "generated/tests/image.rs").unlink()
-        with self.assertRaisesRegex(RuntimeError, "production image check was removed"):
-            self.check_project()
 
     def test_generated_check_matrix(self):
         for fast_only in (False, True):

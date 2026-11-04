@@ -16,8 +16,10 @@ services:
   service:
     <<: *service
     ports:
-      - ${PORT:-8080}:${PORT:-8080}
-    stop_grace_period: 30s
+      # Only this machine can reach the service, which writes to a real database.
+      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}
+    # Longer than the server's 30-second shutdown timeout, so the pool closes before SIGKILL.
+    stop_grace_period: 40s
 
   # Runs only when asked: starting the service never applies migrations.
   migrate:

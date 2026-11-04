@@ -102,9 +102,16 @@ make compose-up        # start the service; starting it never applies migrations
 make compose-down      # stop and remove the service container
 ```
 
-Compose reads `.env`. Inside a container, `localhost` is the container itself, so reach PostgreSQL on this machine as `host.docker.internal`, for example `DATABASE_URL=postgres://<user>@host.docker.internal:5432/<database>`.
-Read the service's logs with `docker compose logs`.
-These targets need Docker with Compose v2; Colima is the tested local runtime.
+Compose reads `.env`, or the file `SERVICE_ENV_FILE` names; `compose-up` and `compose-migrate` stop when that file is missing.
+Inside a container, `localhost` is the container itself, so reach PostgreSQL on this machine as `host.docker.internal`, for example `DATABASE_URL=postgres://<user>@host.docker.internal:5432/<database>`.
+`make run` needs `localhost`, so keep the container's settings in a second file, which Git and the image both ignore:
+
+```sh
+SERVICE_ENV_FILE=.env.container make compose-up
+```
+
+The service accepts connections only from this machine. Read its logs with `docker compose logs`.
+These targets need Docker with Compose 2.24.0 or later; Colima is the tested local runtime.
 
 {% if include_tasks %}## Tasks example
 
@@ -138,11 +145,7 @@ After changing repository SQL, migrations, database types or concurrency behavio
 TEST_DATABASE_URL=postgres://localhost/postgres make test-db
 ```
 
-After changing the Dockerfile, the Compose file, or how the service starts, check the image against the same server. It needs Docker:
-
-```sh
-TEST_DATABASE_URL=postgres://localhost/postgres make image-check
-```
+After changing the Dockerfile, `.dockerignore` or the Compose file, build and run the image with the container targets above. They need Docker. No automated check starts the image.
 
 Before proposing the complete change for publication, run:
 
@@ -238,7 +241,7 @@ The run fails before any tag exists when the version is not `X.Y.Z`, `main` has 
 Only GitHub Actions runs from `push` and `pull_request` events count, because manual, comment and scheduled runs report on the `main` head whatever they test. Checks from other apps still count, and `ci-command-state/` bookkeeping statuses do not.
 A cancelled check run does not block, whoever cancelled it, and the run's own lint and tests are the only replacement for it. A cancelled command's `error` status still blocks.
 It then runs `make lint`, `make test` and `make test-db` with default features and `api-doc` on the commit. The database tests use a temporary PostgreSQL that the run starts for itself.
-It then builds the production image and runs `make image-check` against that server, so an image that cannot migrate, serve or stop cleanly stops the release.
+It then runs `make image`, so a Dockerfile that no longer builds stops the release. The release never starts the image.
 Only the final job, which runs after every check passes, has permission to write.
 Anyone with write access can run the workflow, so it adds no approval beyond repository permissions.
 

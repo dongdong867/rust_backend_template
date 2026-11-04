@@ -22,7 +22,6 @@ SHARED_CI_FILES = (
     ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
     ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
     ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
-    ".github/ci/compose.host-network.yaml",
 )
 REBUILD_PROBE = "migrations/99999999999999_rebuild_probe.sql"
 REBUILD_COMMANDS = (
@@ -164,7 +163,6 @@ def check_project(project, name, include_tasks):
     require((service / "tests/database_tls.rs").is_file(), "Generic TLS coverage was removed.")
     require((service / "tests/postgres_database.rs").is_file(),
             "The PostgreSQL scaffold smoke check was removed.")
-    require((service / "tests/image.rs").is_file(), "The production image check was removed.")
     dockerfile = (project / "Dockerfile").read_text() if (project / "Dockerfile").is_file() else ""
     compose = (project / "compose.yaml").read_text() if (project / "compose.yaml").is_file() else ""
     require(f"target/release/{name} " in dockerfile

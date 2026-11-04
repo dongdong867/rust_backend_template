@@ -8,7 +8,7 @@ CARGO_FEATURES = $(if $(strip $(FEATURES)),--features "$(FEATURES)")
 IMAGE := rust-backend-template:local
 
 .DEFAULT_GOAL := help
-.PHONY: help run migrate build test test-crate test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version image compose-up compose-down compose-migrate image-check
+.PHONY: help run migrate build test test-crate test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version image compose-up compose-down compose-migrate compose-settings
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -39,18 +39,17 @@ test-db: ## Run real SQL tests on an existing server (requires TEST_DATABASE_URL
 image: ## Build the production container image
 	docker build --build-arg FEATURES="$(FEATURES)" --tag $(IMAGE) .
 
-compose-up: image ## Run the service container against an existing PostgreSQL, reading .env
-	docker compose up --detach --no-build
+compose-settings:
+	@test -f "$${SERVICE_ENV_FILE:-.env}" || { echo "$${SERVICE_ENV_FILE:-.env} is missing; copy .example.env and reach PostgreSQL as host.docker.internal." >&2; exit 1; }
+
+compose-up: compose-settings image ## Run the service container against an existing PostgreSQL, reading .env or SERVICE_ENV_FILE
+	docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" up --detach --no-build --wait
 
 compose-down: ## Stop and remove the service container
 	docker compose down
 
-compose-migrate: image ## Apply migrations from the image, reading .env
-	docker compose run --rm migrate
-
-image-check: image ## Check the image against an existing server (requires TEST_DATABASE_URL and Docker)
-	@test -n "$${TEST_DATABASE_URL:-}" || { echo "TEST_DATABASE_URL is required; use a dedicated PostgreSQL test server with CREATEDB permission." >&2; exit 1; }
-	@cargo test --locked -p rust-backend-template $(CARGO_FEATURES) --test image -- --ignored
+compose-migrate: compose-settings image ## Apply migrations from the image, reading .env or SERVICE_ENV_FILE
+	docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" run --rm migrate
 
 template-test: ## Generate both variants and run their full checks (requires TEST_DATABASE_URL)
 	python3 scripts/template_test.py

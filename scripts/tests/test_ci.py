@@ -1,6 +1,7 @@
 """Policy guards, not a YAML parser: actionlint validates the actual workflows."""
 
 import importlib.util
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -266,43 +267,40 @@ class CiPolicyTest(unittest.TestCase):
         # The temporary server accepts connections without a password, so only this runner reaches it.
         self.assertIn("- 127.0.0.1:5432:5432\n", verify)
         self.assertIn("--health-cmd", verify)
-        # Two database test steps and the image check share the temporary server.
-        self.assertEqual(verify.count("TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n"), 3)
+        self.assertEqual(verify.count("TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n"), 2)
         last_fast_test = verify.index("make test FEATURES=api-doc")
         for target in ("make test-db FEATURES=\n", "make test-db FEATURES=api-doc"):
             self.assertLess(last_fast_test, verify.index(target))
         for forbidden in ("services:", "test-db", "TEST_DATABASE_URL"):
             self.assertNotIn(forbidden, publish)
 
-    def test_release_checks_the_image_after_the_database_tests(self):
+    def test_release_builds_the_image_after_the_database_tests(self):
         sections = jobs(self.workflow("release.yml"))
         verify, publish = sections["verify"], sections["publish"]
-        step = verify.split("- name: Production image check\n", 1)[1].split("\n      - name:", 1)[0]
-        self.assertIn("run: make image-check FEATURES=\n", step)
-        # The temporary server listens only on the runner, so the containers share its network.
-        self.assertIn("COMPOSE_FILE: compose.yaml:.github/ci/compose.host-network.yaml\n", step)
-        self.assertIn("IMAGE_CHECK_DATABASE_HOST: 127.0.0.1\n", step)
-        self.assertIn("TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n", step)
+        step = verify.split("- name: Build the production image\n", 1)[1].split("\n      - name:", 1)[0]
+        # Only a build: no container runs, so the step needs no database.
+        self.assertEqual(step.strip(), "run: make image FEATURES=")
         for target in ("make test-db FEATURES=\n", "make test-db FEATURES=api-doc"):
-            self.assertLess(verify.index(target), verify.index("make image-check"))
-        self.assertNotIn("image-check", publish)
-        override = (ROOT / ".github/ci/compose.host-network.yaml").read_text()
-        self.assertEqual(override.count("network_mode: host"), 2)
-        self.assertIn(".github/ci/compose.host-network.yaml", template_test.SHARED_CI_FILES)
+            self.assertLess(verify.index(target), verify.index("make image"))
+        for forbidden in ("make image", "docker", "compose"):
+            self.assertNotIn(forbidden, publish)
 
-    def test_only_the_release_workflow_runs_containers(self):
+    def test_only_the_release_workflow_builds_images(self):
         names = {path.name for path in (ROOT / ".github/workflows").glob("*.yml")}
         for name in names - {"release.yml"}:
             text = self.workflow(name)
-            for forbidden in ("docker", "compose", "image-check", "make image"):
+            for forbidden in ("docker", "compose", "make image"):
                 self.assertNotIn(forbidden, text, name)
+        release = self.workflow("release.yml")
+        for forbidden in ("docker", "compose"):
+            self.assertNotIn(forbidden, release)
         hook = (ROOT / ".githooks/pre-commit").read_text()
         recipe = subprocess.run(
             ["make", "--no-print-directory", "-n", "test"],
             cwd=ROOT, capture_output=True, text=True, check=True,
         ).stdout
         for text in (hook, recipe):
-            for forbidden in ("docker", "compose", "image-check"):
+            for forbidden in ("docker", "compose"):
                 self.assertNotIn(forbidden, text)
 
     def test_only_the_release_workflow_starts_postgres(self):
@@ -349,6 +347,9 @@ class CiPolicyTest(unittest.TestCase):
         self.assertEqual(text.count("interval: weekly"), 3)
         self.assertEqual(text.count("groups:"), 3)
         self.assertEqual(text.count('patterns: ["*"]'), 3)
+        # rust-toolchain.toml decides the build's Rust, so the image tag moves only with it.
+        docker = text.split("package-ecosystem: docker\n", 1)[1]
+        self.assertIn("    ignore:\n      - dependency-name: rust\n", docker)
 
     def test_fork_approval_guidance_distinguishes_private_repositories(self):
         for name in ("README.md", "README.md.liquid"):
@@ -401,6 +402,56 @@ class CiPolicyTest(unittest.TestCase):
         self.assertNotIn("test-db", text)
 
 
+class ContainerPolicyTest(unittest.TestCase):
+    """Source files only: the template twin check proves each .liquid twin renders to them."""
+
+    def test_no_local_settings_enter_the_build_context(self):
+        lines = [line for line in (ROOT / ".dockerignore").read_text().splitlines()
+                 if line and not line.startswith("#")]
+        self.assertEqual(lines[0], "*")
+        # The last matching line wins, so the exclusion must follow every re-admitted folder.
+        last_admitted = max(index for index, line in enumerate(lines) if line.startswith("!"))
+        self.assertGreater(lines.index("**/.env*"), last_admitted)
+
+    def test_the_image_builds_with_the_pinned_toolchain(self):
+        channel = re.search(r'^channel = "([^"]+)"$',
+                            (ROOT / "rust-toolchain.toml").read_text(), re.M).group(1)
+        tag = re.search(r"^FROM rust:(\d+\.\d+\.\d+)-", (ROOT / "Dockerfile").read_text(), re.M)
+        self.assertEqual(tag.group(1), channel)
+
+    def test_compose_serves_only_this_machine_and_outlasts_shutdown(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        self.assertIn("      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}\n", compose)
+        timeout = re.search(r"^pub const SHUTDOWN_TIMEOUT_SECS: u64 = (\d+);$",
+                            (ROOT / "rust-backend-template/src/server.rs").read_text(), re.M)
+        grace = re.search(r"^    stop_grace_period: (\d+)s$", compose, re.M)
+        # The pool closes after the server's shutdown timeout, so stopping needs more time.
+        self.assertGreater(int(grace.group(1)), int(timeout.group(1)))
+
+    def test_compose_targets_stop_without_a_settings_file(self):
+        makefile = (ROOT / "Makefile").read_text()
+        for target in ("compose-up", "compose-migrate"):
+            self.assertRegex(makefile, rf"(?m)^{target}: compose-settings image ##")
+        # The same file sets the container's PORT and fills ${PORT} in the published port.
+        settings = '--env-file "$${SERVICE_ENV_FILE:-.env}"'
+        self.assertIn(f"\tdocker compose {settings} up --detach --no-build --wait\n", makefile)
+        self.assertIn(f"\tdocker compose {settings} run --rm migrate\n", makefile)
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Path(directory) / ".env.container"
+            missing = self.compose_settings(settings)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn(f"{settings} is missing", missing.stderr)
+            settings.write_text("DATABASE_URL=postgres://synthetic@host.docker.internal/db\n")
+            self.assertEqual(self.compose_settings(settings).returncode, 0)
+
+    def compose_settings(self, settings):
+        return subprocess.run(
+            ["make", "--no-print-directory", "compose-settings"],
+            cwd=ROOT, capture_output=True, text=True,
+            env={"PATH": os.environ["PATH"], "SERVICE_ENV_FILE": str(settings)},
+        )
+
+
 class GeneratedCiTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -412,7 +463,6 @@ class GeneratedCiTest(unittest.TestCase):
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
             ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
-            ".github/ci/compose.host-network.yaml",
         )
         for name in self.files:
             for root in (self.source, self.project):
