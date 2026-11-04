@@ -76,11 +76,22 @@ def passed(item):
     return item["status"] == "completed" and item["conclusion"] in PASSING
 
 
+def from_fork(run, repo):
+    """An outsider chooses what a fork PR run tests and can leave it awaiting approval.
+
+    A run that names no head repository still counts, so an unknown origin never passes.
+    """
+    head = run.get("head_repository")
+    name = head.get("full_name") if isinstance(head, dict) else None
+    return isinstance(name, str) and name.casefold() != repo.casefold()
+
+
 def require_passing_checks(api, repo, sha, run_id):
     """Every run, check and status about the commit must pass."""
     own = api("GET", f"repos/{repo}/actions/runs/{run_id}")["check_suite_id"]
     runs = list(github_client.pages(api, f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs"))
-    ignored = {own} | {run["check_suite_id"] for run in runs if run["event"] not in COMMIT_EVENTS}
+    ignored = {own} | {run["check_suite_id"] for run in runs
+                       if run["event"] not in COMMIT_EVENTS or from_fork(run, repo)}
     # A run that fails to start, or has not created its first job, has no check runs to read.
     failing = [run["name"] for run in runs
                if run["check_suite_id"] not in ignored and not passed(run)]

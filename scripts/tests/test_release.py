@@ -83,9 +83,9 @@ def check(name, status="completed", conclusion="success", suite=1):
     return {"name": name, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
 
 
-def workflow_run(suite, event, status="completed", conclusion="success", name="Workflow"):
+def workflow_run(suite, event, status="completed", conclusion="success", name="Workflow", head=REPO):
     return {"check_suite_id": suite, "event": event, "status": status, "conclusion": conclusion,
-            "name": name, "head_sha": MAIN}
+            "name": name, "head_sha": MAIN, "head_repository": {"full_name": head}}
 
 
 class VerifyTest(unittest.TestCase):
@@ -236,6 +236,41 @@ class VerifyTest(unittest.TestCase):
             workflow_run(6, "issue_comment", "completed", "failure"),
         ]
         self.verify()
+
+    def test_fork_runs_awaiting_approval_are_ignored(self):
+        # An outsider's fork PR into any branch can put a run on the main head that never starts.
+        for status, conclusion in (("completed", "action_required"), ("action_required", None),
+                                   ("waiting", None), ("queued", None)):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.data["workflow_runs"][MAIN] = [
+                    workflow_run(5, "pull_request", status, conclusion, "Formatting", head="outsider/service"),
+                ]
+                self.verify()
+
+    def test_failed_fork_runs_and_their_checks_are_ignored(self):
+        # The outsider chooses the base branch, so the result does not describe the main head.
+        self.data["workflow_runs"][MAIN] = [
+            workflow_run(5, "pull_request", "completed", "failure", "Formatting", head="outsider/service"),
+        ]
+        self.data["check_runs"][MAIN] = [check("Formatting", conclusion="failure", suite=5)]
+        self.verify()
+
+    def test_own_runs_count_whatever_the_name_case(self):
+        self.data["workflow_runs"][MAIN] = [
+            workflow_run(5, "pull_request", "completed", "failure", "Formatting", head="Owner/Service"),
+        ]
+        self.assert_rejected("Formatting")
+
+    def test_runs_that_name_no_head_repository_still_count(self):
+        for head in (None, {}, {"full_name": None}, "missing"):
+            with self.subTest(head=head):
+                run = workflow_run(5, "pull_request", "completed", "failure", "Formatting")
+                if head == "missing":
+                    del run["head_repository"]
+                else:
+                    run["head_repository"] = head
+                self.data["workflow_runs"][MAIN] = [run]
+                self.assert_rejected("Formatting")
 
     def test_checks_on_later_pages_are_read(self):
         self.data["check_runs"][MAIN] = [check(f"ok-{n}") for n in range(100)] + [
