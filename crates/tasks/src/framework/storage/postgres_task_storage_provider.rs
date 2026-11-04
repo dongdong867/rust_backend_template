@@ -15,10 +15,17 @@ impl PostgresTaskStorageProvider {
         Self { pool }
     }
 
-    fn persistence_error(_: sqlx::Error) -> TaskStorageError {
-        // Never format or retain SQLx errors, SQL, or credentials.
-        tracing::error!("task persistence failed");
+    fn persistence_error(error: sqlx::Error) -> TaskStorageError {
+        // Never format or retain SQLx errors, SQL, or credentials; only fixed reasons are logged.
+        // Tracing records an `Option` field only when it is `Some`.
+        let reason = Self::failure_reason(&error);
+        tracing::error!(reason, "task persistence failed");
         TaskStorageError::Persistence
+    }
+
+    /// The fixed log reason for a database failure that operators need to tell apart.
+    fn failure_reason(error: &sqlx::Error) -> Option<&'static str> {
+        matches!(error, sqlx::Error::PoolTimedOut).then_some("pool_timeout")
     }
 }
 
@@ -87,6 +94,36 @@ impl TaskStorageProvider for PostgresTaskStorageProvider {
             Ok(stored) if stored.status == "completed" => Err(TaskStorageError::AlreadyCompleted),
             Ok(_) => Err(TaskStorageError::Persistence),
             Err(error) => Err(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::PostgresTaskStorageProvider;
+
+    #[test]
+    fn a_pool_timeout_has_the_pool_timeout_reason() {
+        assert_eq!(
+            PostgresTaskStorageProvider::failure_reason(&sqlx::Error::PoolTimedOut),
+            Some("pool_timeout")
+        );
+    }
+
+    #[test]
+    fn other_database_failures_have_no_reason() {
+        for error in [
+            sqlx::Error::PoolClosed,
+            sqlx::Error::RowNotFound,
+            sqlx::Error::Io(io::Error::from(io::ErrorKind::ConnectionReset)),
+        ] {
+            assert_eq!(
+                PostgresTaskStorageProvider::failure_reason(&error),
+                None,
+                "{error:?}"
+            );
         }
     }
 }

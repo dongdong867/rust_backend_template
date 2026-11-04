@@ -4,12 +4,15 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-{% if include_tasks %}use actix_web::http::header::CONTENT_TYPE;
+{% if include_tasks %}use actix_web::body::MessageBody;
+use actix_web::dev::ServiceResponse;
+use actix_web::http::header::CONTENT_TYPE;
 {% endif %}use actix_web::{http::StatusCode, test};
-use environment::Config;
+use environment::{% if include_tasks %}{Config, LogFormat}{% else %}Config{% endif %};
 use {{crate_name}}::{
     container::Container, create_app::create_app, database::create_pool, providers::Providers,
-};
+{% if include_tasks %}    telemetry,
+{% endif %}};
 {% if include_tasks %}use serde_json::{Value, json};
 {% endif %}use sqlx::PgPool;
 {% if include_tasks %}use tasks::framework::storage::PostgresTaskStorageProvider;
@@ -87,26 +90,31 @@ async fn acquiring_from_a_closed_port_times_out_after_the_configured_wait() {
     database.close().await;
 }
 
-{% if include_tasks %}#[actix_web::test]
-async fn creating_a_task_fails_with_500_after_the_acquire_timeout_when_the_database_is_down() {
-    let (config, _port) = closed_port_config(Some("1"));
-    let database = create_pool(&config.database).unwrap();
+{% if include_tasks %}/// Sends one task creation request to an app that stores tasks in `database`.
+async fn post_a_task(config: Config, database: &PgPool) -> ServiceResponse<impl MessageBody> {
     let app = test::init_service(create_app(
         config.http,
-        container_for(&database),
+        container_for(database),
         #[cfg(feature = "api-doc")]
         config.api_doc,
     ))
     .await;
-    let started = Instant::now();
-    let response = test::call_service(
+    test::call_service(
         &app,
         test::TestRequest::post()
             .uri("/v1/tasks")
             .set_json(json!({"title": "Write documentation"}))
             .to_request(),
     )
-    .await;
+    .await
+}
+
+#[actix_web::test]
+async fn creating_a_task_fails_with_500_after_the_acquire_timeout_when_the_database_is_down() {
+    let (config, _port) = closed_port_config(Some("1"));
+    let database = create_pool(&config.database).unwrap();
+    let started = Instant::now();
+    let response = post_a_task(config, &database).await;
     let elapsed = started.elapsed();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
@@ -123,6 +131,106 @@ async fn creating_a_task_fails_with_500_after_the_acquire_timeout_when_the_datab
     );
     assert!(elapsed < Duration::from_secs(5), "waited {elapsed:?}");
     database.close().await;
+}
+
+/// Runs one ignored probe in a fresh process and returns its storage and route log events.
+///
+/// A fresh process isolates tracing's callsite cache. The probe's output must hold no
+/// connection details, SQLx error text or SQL.
+fn probe_failure_logs(probe: &str) -> (Value, Value) {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", probe, "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let logs = String::from_utf8(output.stdout).unwrap();
+    for detail in [
+        "postgres://",
+        "closed_probe",
+        "timed out",
+        "closed pool",
+        "INSERT INTO",
+        "PoolTimedOut",
+        "PoolClosed",
+    ] {
+        assert!(!logs.contains(detail), "{detail} in {logs}");
+    }
+    let events: Vec<Value> = logs
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let find = |message: &str| {
+        events
+            .iter()
+            .find(|event| event["message"] == message)
+            .cloned()
+            .unwrap_or_else(|| panic!("{message} must be logged in {logs}"))
+    };
+    (
+        find("task persistence failed"),
+        find("task operation failed"),
+    )
+}
+
+/// The sorted field names of one log event, so a test fails on any extra field, such as an error.
+fn field_names(event: &Value) -> Vec<&str> {
+    let mut names: Vec<&str> = event
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+#[::core::prelude::v1::test]
+fn a_pool_timeout_logs_its_own_reason_without_connection_details() {
+    let (storage, route) = probe_failure_logs("pool_timeout_log_probe");
+    assert_eq!(
+        field_names(&storage),
+        ["level", "message", "reason", "span", "target", "timestamp"]
+    );
+    assert_eq!(storage["level"], "ERROR");
+    assert_eq!(storage["reason"], "pool_timeout");
+    assert_eq!(route["reason"], "persistence");
+}
+
+#[::core::prelude::v1::test]
+fn a_closed_pool_logs_no_reason_and_no_error_text() {
+    let (storage, route) = probe_failure_logs("closed_pool_log_probe");
+    assert_eq!(
+        field_names(&storage),
+        ["level", "message", "span", "target", "timestamp"]
+    );
+    assert_eq!(storage["level"], "ERROR");
+    assert_eq!(route["reason"], "persistence");
+}
+
+#[actix_web::test]
+#[ignore = "invoked by the parent test in a fresh process to isolate tracing's subscriber cache"]
+async fn pool_timeout_log_probe() {
+    telemetry::init("info", LogFormat::Json);
+    let (config, _port) = closed_port_config(Some("1"));
+    let database = create_pool(&config.database).unwrap();
+    let response = post_a_task(config, &database).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    database.close().await;
+}
+
+#[actix_web::test]
+#[ignore = "invoked by the parent test in a fresh process to isolate tracing's subscriber cache"]
+async fn closed_pool_log_probe() {
+    telemetry::init("info", LogFormat::Json);
+    let (config, _port) = closed_port_config(None);
+    let database = create_pool(&config.database).unwrap();
+    database.close().await;
+    let response = post_a_task(config, &database).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 {% endif %}#[actix_web::test]
