@@ -154,6 +154,8 @@ fn probe_failure_logs(probe: &str) -> (Value, Value) {
         "timed out",
         "closed pool",
         "INSERT INTO",
+        "PoolTimedOut",
+        "PoolClosed",
     ] {
         assert!(!logs.contains(detail), "{detail} in {logs}");
     }
