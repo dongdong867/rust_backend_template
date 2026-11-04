@@ -90,20 +90,6 @@ The default `sslmode=prefer` permits plaintext fallback; it does not require enc
 When putting a URL with `&` query separators in a shell-loaded `.env`, quote the complete value.
 Supply real credentials through the deployment environment or an ignored local file, never committed examples.
 
-## Tasks example
-
-```sh
-curl -X POST localhost:8080/v1/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"title":"Write documentation"}'
-curl 'localhost:8080/v1/tasks/<id>'
-curl -X POST 'localhost:8080/v1/tasks/<id>/complete'
-```
-
-Create returns `201`; get and complete return `200` with the task.
-Completing an already-completed task returns `409`.
-Titles are preserved as submitted and must contain 1–200 Unicode characters, excluding U+0000; invalid titles return `400`.
-
 ### Run it in a container
 
 The image holds the service and its migration command on a minimal non-root runtime with no shell.
@@ -119,6 +105,20 @@ make compose-down      # stop and remove the service container
 Compose reads `.env`. Inside a container, `localhost` is the container itself, so reach PostgreSQL on this machine as `host.docker.internal`, for example `DATABASE_URL=postgres://<user>@host.docker.internal:5432/<database>`.
 Read the service's logs with `docker compose logs`.
 These targets need Docker with Compose v2; Colima is the tested local runtime.
+
+## Tasks example
+
+```sh
+curl -X POST localhost:8080/v1/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Write documentation"}'
+curl 'localhost:8080/v1/tasks/<id>'
+curl -X POST 'localhost:8080/v1/tasks/<id>/complete'
+```
+
+Create returns `201`; get and complete return `200` with the task.
+Completing an already-completed task returns `409`.
+Titles are preserved as submitted and must contain 1–200 Unicode characters, excluding U+0000; invalid titles return `400`.
 
 ## Develop
 
