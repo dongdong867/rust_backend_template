@@ -178,7 +178,7 @@ server {
 So that nginx logs the client's address instead of Cloudflare's, write the include file from Cloudflare's published ranges, then reload:
 
 ```sh
-{ for v in 4 6; do curl -fsS "https://www.cloudflare.com/ips-v$v" | sed 's/.*/set_real_ip_from &;/'; done
+{ for v in 4 6; do curl -fsS "https://www.cloudflare.com/ips-v$v" | awk 'NF { print "set_real_ip_from " $1 ";" }'; done
   echo 'set_real_ip_from 127.0.0.1;'
   echo 'real_ip_header CF-Connecting-IP;'; } | sudo tee /etc/nginx/cloudflare-real-ip.conf
 sudo nginx -t && sudo systemctl reload nginx
