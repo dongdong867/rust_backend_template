@@ -211,7 +211,7 @@ With UFW, keep SSH open before enabling it; with a cloud firewall, allow the sam
 
 ```sh
 sudo ufw allow OpenSSH
-for range in $(cat v4 v6); do sudo ufw allow proto tcp from "$range" to any port 443; done
+for range in $(awk 'NF { print $1 }' v4 v6); do sudo ufw allow proto tcp from "$range" to any port 443; done
 sudo ufw enable
 ```
 
