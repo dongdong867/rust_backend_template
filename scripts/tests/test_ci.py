@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 
@@ -484,6 +485,9 @@ class ContainerPolicyTest(unittest.TestCase):
             self.assertIn("make compose-up", rollback, name)
             self.assertNotIn("compose-migrate", rollback.split("```", 2)[1], name)
             self.assertIn("Migrations are never undone", rollback, name)
+            self.assertIn("works with the newer schema", rollback, name)
+            # Tags from before compose-health check nothing, so rollback checks /health itself.
+            self.assertIn("/health", rollback.split("```", 2)[1], name)
             # nginx is checked and reloaded only after either Cloudflare mode has its files.
             nginx = release.split("\n### Put nginx in front\n", 1)[1]
             for setup in ("Cloudflare Origin Certificate", "ingress:"):
@@ -519,14 +523,18 @@ class ComposeHealthTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.directory)
-        # A fake docker records what the target asks for, so no test needs Docker.
+        # A fake docker answers `compose config` with a published port and `logs` with a line,
+        # so no test needs Docker; Compose itself resolves PORT in real use.
         bin_dir = self.directory / "bin"
         bin_dir.mkdir()
-        (bin_dir / "docker").write_text('#!/bin/sh\necho "$@" >> "$DOCKER_CALLS"\necho "service log line"\n')
+        (bin_dir / "docker").write_text(
+            '#!/bin/sh\necho "$@" >> "$DOCKER_CALLS"\ncase " $* " in\n'
+            '  *" config "*) [ -z "$FAKE_PUBLISHED" ] || printf \'    ports:\\n'
+            '      - target: %s\\n        published: "%s"\\n\' "$FAKE_PUBLISHED" "$FAKE_PUBLISHED" ;;\n'
+            '  *" logs "*) echo "service log line" ;;\nesac\n')
         (bin_dir / "docker").chmod(0o755)
         self.path = f"{bin_dir}:{os.environ['PATH']}"
         self.calls = self.directory / "docker-calls"
-        self.settings = self.directory / "service.env"
 
     def serve_health(self):
         class Health(http.server.BaseHTTPRequestHandler):
@@ -539,6 +547,7 @@ class ComposeHealthTest(unittest.TestCase):
 
         server = http.server.HTTPServer(("127.0.0.1", 0), Health)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         return server.server_address[1]
 
@@ -547,44 +556,50 @@ class ComposeHealthTest(unittest.TestCase):
             probe.bind(("127.0.0.1", 0))
             return probe.getsockname()[1]
 
-    def compose_health(self, shell_port=None):
-        env = {"PATH": self.path, "SERVICE_ENV_FILE": str(self.settings),
-               "DOCKER_CALLS": str(self.calls), "COMPOSE_HEALTH_SECONDS": "2"}
-        if shell_port is not None:
-            env["PORT"] = str(shell_port)
+    def compose_health(self, published):
+        env = {"PATH": self.path, "DOCKER_CALLS": str(self.calls), "FAKE_PUBLISHED": str(published),
+               "COMPOSE_HEALTH_SECONDS": "2"}
         return subprocess.run(["make", "--no-print-directory", "compose-health"],
-                              cwd=ROOT, capture_output=True, text=True, env=env)
+                              cwd=ROOT, capture_output=True, text=True, env=env, timeout=20)
 
     def test_compose_up_ends_with_the_health_check(self):
         recipe = subprocess.run(["make", "--no-print-directory", "-n", "compose-up"],
                                 cwd=ROOT, capture_output=True, text=True,
-                                env={"PATH": self.path, "SERVICE_ENV_FILE": str(self.settings)})
+                                env={"PATH": self.path, "SERVICE_ENV_FILE": "/dev/null"})
         # `make -n` still runs the recursive make, so its health check recipe follows `up`.
         lines = recipe.stdout.splitlines()
         up = next(i for i, line in enumerate(lines) if "up --detach --no-build --wait" in line)
         health = next(i for i, line in enumerate(lines) if '"http://127.0.0.1:$port/health"' in line)
         self.assertLess(up, health)
 
-    def test_a_service_answering_health_passes(self):
-        self.settings.write_text(f'PORT="{self.serve_health()}"\nDATABASE_URL=postgres://x@h/db\n')
-        result = self.compose_health()
+    def test_the_published_port_answering_health_passes(self):
+        result = self.compose_health(self.serve_health())
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(self.calls.exists())
-
-    def test_a_shell_port_wins_over_the_settings_file(self):
-        self.settings.write_text(f"PORT={self.closed_port()}\n")
-        result = self.compose_health(shell_port=self.serve_health())
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("logs", self.calls.read_text())
 
     def test_a_service_that_never_answers_fails_with_its_log(self):
         port = self.closed_port()
-        self.settings.write_text(f"PORT={port}\n")
-        result = self.compose_health()
+        result = self.compose_health(port)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f"GET /health on 127.0.0.1:{port} did not return 200 within 2 s", result.stderr)
         self.assertIn("service log line", result.stderr)
         self.assertIn("logs --no-color --tail 50 service", self.calls.read_text())
 
+    def test_a_port_that_accepts_but_never_answers_still_fails_in_time(self):
+        silent = socket.socket()
+        self.addCleanup(silent.close)
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(8)
+        started = time.monotonic()
+        result = self.compose_health(silent.getsockname()[1])
+        self.assertNotEqual(result.returncode, 0)
+        # Two attempts of at most 2 s each, plus a 1 s pause after each.
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_an_unreadable_compose_config_fails_without_polling(self):
+        result = self.compose_health("")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not read the service's published port", result.stderr)
 
 class GeneratedCiTest(unittest.TestCase):
     def setUp(self):

@@ -48,11 +48,12 @@ compose-up: compose-settings image ## Run the service container against an exist
 	@$(MAKE) --no-print-directory compose-health
 
 # A container that exits at startup restarts in a loop, which `--wait` counts as running,
-# so the start counts only once GET /health answers. PORT resolves as Compose resolves it.
+# so the start counts only once GET /health answers. Compose's own config names the port.
 compose-health:
-	@port="$${PORT:-$$(sed -n 's/^PORT=//p' "$${SERVICE_ENV_FILE:-.env}" 2>/dev/null | tail -n 1 | tr -d "\"'")}"; port="$${port:-8080}"; \
+	@port="$$(docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" config 2>/dev/null | sed -n 's/^ *published: "\{0,1\}\([0-9][0-9]*\)"\{0,1\}$$/\1/p' | head -n 1)"; \
+	if [ -z "$$port" ]; then echo "could not read the service's published port from docker compose config." >&2; exit 1; fi; \
 	for attempt in $$(seq $(COMPOSE_HEALTH_SECONDS)); do \
-	  curl -fs -o /dev/null "http://127.0.0.1:$$port/health" && exit 0; sleep 1; \
+	  curl -fs --max-time 2 -o /dev/null "http://127.0.0.1:$$port/health" && exit 0; sleep 1; \
 	done; \
 	echo "GET /health on 127.0.0.1:$$port did not return 200 within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; \
 	docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" logs --no-color --tail 50 service >&2; exit 1

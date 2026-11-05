@@ -135,6 +135,7 @@ Keep the settings outside the checkout, readable only by the deploy user. This c
 mkdir -p ~/.config/rust-backend-template
 f=~/.config/rust-backend-template/service.env
 [ -e "$f" ] || install -m 600 /dev/null "$f"
+chmod 600 "$f"
 # Set PORT and DATABASE_URL in it, and API_DOC_PASSWORD for an api-doc build.
 ```
 
@@ -151,6 +152,7 @@ make compose-up
 
 `make compose-migrate` builds the image from the checked-out tag, then applies its migrations.
 `make compose-up` replaces the running container, so requests fail for a few seconds. It then fails, printing the service's log, unless `GET /health` answers within 30 seconds.
+By then the old release is stopped: fix the settings and run `make compose-up` again, or follow [Roll back](#roll-back).
 For an api-doc build, add `FEATURES=api-doc` to every `make` command in this section, the rollback included.
 The service restarts after a crash or a reboot until `make compose-down` stops it, and Docker keeps at most 3 log files of 10 MB for it.
 
@@ -194,25 +196,28 @@ Set up Cloudflare in one of two ways:
   ```
 
 Then download Cloudflare's address ranges, so that nginx logs the client's address instead of Cloudflare's, and reload nginx.
-The commands stop at the first failure, so a failed download leaves the include file as it was:
+The commands build the file in a temporary folder and stop at the first failure, so a failed download, or a response that is not a list of ranges, leaves nginx's include file as it was:
 
 ```sh
 cd "$(mktemp -d)"
 curl -fsS -o v4 https://www.cloudflare.com/ips-v4 && curl -fsS -o v6 https://www.cloudflare.com/ips-v6 &&
-  [ -s v4 ] && [ -s v6 ] &&
-  { awk 'NF { print "set_real_ip_from " $1 ";" }' v4 v6
+  [ -s v4 ] && [ -s v6 ] && awk 'NF { print $1 }' v4 v6 > ranges &&
+  awk '$1 !~ /^[0-9a-f:.]+\/[0-9]+$/ { bad = 1 } END { exit bad }' ranges &&
+  { awk '{ print "set_real_ip_from " $1 ";" }' ranges
     echo 'set_real_ip_from 127.0.0.1;'
-    echo 'real_ip_header CF-Connecting-IP;'; } | sudo tee /etc/nginx/cloudflare-real-ip.conf >/dev/null &&
+    echo 'real_ip_header CF-Connecting-IP;'; } > real-ip.conf &&
+  sudo cp real-ip.conf /etc/nginx/cloudflare-real-ip.conf &&
   sudo nginx -t && sudo systemctl reload nginx
 ```
 
 With proxied DNS, also open port 443 to those ranges only, from the same folder, so nobody reaches the VM around Cloudflare.
-With UFW, keep SSH open before enabling it; with a cloud firewall, allow the same ranges there instead:
+With UFW, keep SSH open before enabling it; with a cloud firewall, allow the same ranges there instead.
+The commands run only after the block above has written `ranges`:
 
 ```sh
-sudo ufw allow OpenSSH
-for range in $(awk 'NF { print $1 }' v4 v6); do sudo ufw allow proto tcp from "$range" to any port 443; done
-sudo ufw enable
+[ -s ranges ] && sudo ufw allow OpenSSH &&
+  for range in $(cat ranges); do sudo ufw allow proto tcp from "$range" to any port 443; done &&
+  sudo ufw enable
 ```
 
 Cloudflare rarely changes these ranges. When [its list](https://www.cloudflare.com/ips/) changes, run both blocks again and delete the firewall rules for ranges it no longer lists.
@@ -226,9 +231,10 @@ cd /srv/rust-backend-template
 git checkout v1.2.2
 export SERVICE_ENV_FILE=~/.config/rust-backend-template/service.env
 make compose-up
+curl -fsS --retry 15 --retry-delay 2 --retry-connrefused http://127.0.0.1:8080/health    # use your PORT
 ```
 
-`make compose-up` checks `GET /health` as it does on a deploy.
+A tag from before `make compose-up` checked `GET /health` does not check it, so the last command does, failing if the release does not answer within 30 seconds.
 Migrations are never undone, and an older `migrate` command refuses a database that has newer migrations.
 Roll back only to a release whose code works with the newer schema, which is why a migration should add columns and tables before a later release removes old ones.
 
