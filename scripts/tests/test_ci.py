@@ -525,11 +525,16 @@ class ComposeHealthTest(unittest.TestCase):
         # so no test needs Docker; Compose itself resolves PORT in real use.
         bin_dir = self.directory / "bin"
         bin_dir.mkdir()
+        # Like real `compose config`, services print alphabetically: a published `adminer`
+        # comes first unless the call names `service`, and target differs from published.
         (bin_dir / "docker").write_text(
             '#!/bin/sh\necho "$@" >> "$DOCKER_CALLS"\ncase " $* " in\n'
-            '  *" config "*) [ -z "$FAKE_PUBLISHED" ] || printf \'    ports:\\n'
-            '      - target: %s\\n        published: "%s"\\n\' "$FAKE_PUBLISHED" "$FAKE_PUBLISHED" ;;\n'
-            '  *" logs "*) echo "service log line" ;;\nesac\n')
+            '  *" config service "*) only=1 ;;\n  *" config "*) only= ;;\n'
+            '  *" logs "*) echo "service log line"; exit 0 ;;\n  *) exit 0 ;;\nesac\n'
+            '[ -n "$only" ] || printf \'services:\\n  adminer:\\n    ports:\\n'
+            '      - target: 8080\\n        published: "%s"\\n\' "$FAKE_OTHER"\n'
+            '[ -z "$FAKE_PUBLISHED" ] || printf \'  service:\\n    ports:\\n      - host_ip: 127.0.0.1\\n'
+            '        target: 8080\\n        published: "%s"\\n\' "$FAKE_PUBLISHED"\n')
         (bin_dir / "docker").chmod(0o755)
         self.path = f"{bin_dir}:{os.environ['PATH']}"
         self.calls = self.directory / "docker-calls"
@@ -556,7 +561,8 @@ class ComposeHealthTest(unittest.TestCase):
 
     def compose_health(self, published):
         env = {"PATH": self.path, "DOCKER_CALLS": str(self.calls), "FAKE_PUBLISHED": str(published),
-               "COMPOSE_HEALTH_SECONDS": "2"}
+               "FAKE_OTHER": str(self.closed_port()), "COMPOSE_HEALTH_SECONDS": "2",
+               "SERVICE_ENV_FILE": "/srv/settings.env"}
         return subprocess.run(["make", "--no-print-directory", "compose-health"],
                               cwd=ROOT, capture_output=True, text=True, env=env, timeout=20)
 
@@ -573,7 +579,10 @@ class ComposeHealthTest(unittest.TestCase):
     def test_the_published_port_answering_health_passes(self):
         result = self.compose_health(self.serve_health())
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("logs", self.calls.read_text())
+        calls = self.calls.read_text()
+        # The port comes from the service alone, read with the deploy's own settings file.
+        self.assertIn("compose --env-file /srv/settings.env config service", calls)
+        self.assertNotIn("logs", calls)
 
     def test_a_service_that_never_answers_fails_with_its_log(self):
         port = self.closed_port()
@@ -591,13 +600,14 @@ class ComposeHealthTest(unittest.TestCase):
         started = time.monotonic()
         result = self.compose_health(silent.getsockname()[1])
         self.assertNotEqual(result.returncode, 0)
-        # Two attempts of at most 2 s each, plus a 1 s pause after each.
-        self.assertLess(time.monotonic() - started, 10)
+        # The 2 s deadline holds even when every attempt waits its full 2 s.
+        self.assertLess(time.monotonic() - started, 5)
 
     def test_an_unreadable_compose_config_fails_without_polling(self):
         result = self.compose_health("")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("could not read the service's published port", result.stderr)
+        self.assertNotIn("logs", self.calls.read_text())
 
 class GeneratedCiTest(unittest.TestCase):
     def setUp(self):

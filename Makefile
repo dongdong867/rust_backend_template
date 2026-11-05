@@ -50,9 +50,10 @@ compose-up: compose-settings image ## Run the service container against an exist
 # A container that exits at startup restarts in a loop, which `--wait` counts as running,
 # so the start counts only once GET /health answers. Compose's own config names the port.
 compose-health:
-	@port="$$(docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" config 2>/dev/null | sed -n 's/^ *published: "\{0,1\}\([0-9][0-9]*\)"\{0,1\}$$/\1/p' | head -n 1)"; \
+	@port="$$(docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" config service 2>/dev/null | sed -n 's/^ *published: "\{0,1\}\([0-9][0-9]*\)"\{0,1\}$$/\1/p' | head -n 1)"; \
 	if [ -z "$$port" ]; then echo "could not read the service's published port from docker compose config." >&2; exit 1; fi; \
-	for attempt in $$(seq $(COMPOSE_HEALTH_SECONDS)); do \
+	end=$$(( $$(date +%s) + $(COMPOSE_HEALTH_SECONDS) )); \
+	while [ "$$(date +%s)" -lt "$$end" ]; do \
 	  curl -fs --max-time 2 -o /dev/null "http://127.0.0.1:$$port/health" && exit 0; sleep 1; \
 	done; \
 	echo "GET /health on 127.0.0.1:$$port did not return 200 within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; \
