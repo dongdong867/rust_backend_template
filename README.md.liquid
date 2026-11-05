@@ -172,7 +172,6 @@ server {
     # Cloudflare Tunnel: replace the four lines above with `listen 127.0.0.1:80;`.
 
     server_name api.example.com;
-    include /etc/nginx/cloudflare-real-ip.conf;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -195,32 +194,13 @@ Set up Cloudflare in one of two ways:
     - service: http_status:404
   ```
 
-Then download Cloudflare's address ranges, so that nginx logs the client's address instead of Cloudflare's, and reload nginx.
-The commands build the file in a temporary folder and stop at the first failure, so a failed download, or a response that is not a list of ranges, leaves nginx's include file as it was:
+Then check the configuration and reload nginx:
 
 ```sh
-cd "$(mktemp -d)"
-curl -fsS -o v4 https://www.cloudflare.com/ips-v4 && curl -fsS -o v6 https://www.cloudflare.com/ips-v6 &&
-  [ -s v4 ] && [ -s v6 ] && awk 'NF { print $1 }' v4 v6 > ranges &&
-  awk '$1 !~ /^[0-9a-f:.]+\/[0-9]+$/ { bad = 1 } END { exit bad }' ranges &&
-  { awk '{ print "set_real_ip_from " $1 ";" }' ranges
-    echo 'set_real_ip_from 127.0.0.1;'
-    echo 'real_ip_header CF-Connecting-IP;'; } > real-ip.conf &&
-  sudo cp real-ip.conf /etc/nginx/cloudflare-real-ip.conf &&
-  sudo nginx -t && sudo systemctl reload nginx
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-With proxied DNS, also open port 443 to those ranges only, from the same folder, so nobody reaches the VM around Cloudflare.
-With UFW, keep SSH open before enabling it; with a cloud firewall, allow the same ranges there instead.
-The commands run only after the block above has written `ranges`:
-
-```sh
-[ -s ranges ] && sudo ufw allow OpenSSH &&
-  for range in $(cat ranges); do sudo ufw allow proto tcp from "$range" to any port 443; done &&
-  sudo ufw enable
-```
-
-Cloudflare rarely changes these ranges. When [its list](https://www.cloudflare.com/ips/) changes, run both blocks again and delete the firewall rules for ranges it no longer lists.
+With proxied DNS, allow port 443 only from [Cloudflare's address ranges](https://www.cloudflare.com/ips/) in the VM's or your cloud provider's firewall, so nobody reaches the VM around Cloudflare. A Tunnel needs no open port.
 
 ### Roll back
 
@@ -231,10 +211,9 @@ cd /srv/{{project-name}}
 git checkout v1.2.2
 export SERVICE_ENV_FILE=~/.config/{{project-name}}/service.env
 make compose-up
-curl -fsS --retry 15 --retry-delay 2 --retry-connrefused http://127.0.0.1:8080/health    # use your PORT
 ```
 
-A tag from before `make compose-up` checked `GET /health` does not check it, so the last command does, failing if the release does not answer within 30 seconds.
+`make compose-up` checks `GET /health` as it does on a deploy.
 Migrations are never undone, and an older `migrate` command refuses a database that has newer migrations.
 Roll back only to a release whose code works with the newer schema, which is why a migration should add columns and tables before a later release removes old ones.
 

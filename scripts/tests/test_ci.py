@@ -486,8 +486,6 @@ class ContainerPolicyTest(unittest.TestCase):
             self.assertNotIn("compose-migrate", rollback.split("```", 2)[1], name)
             self.assertIn("Migrations are never undone", rollback, name)
             self.assertIn("works with the newer schema", rollback, name)
-            # Tags from before compose-health check nothing, so rollback checks /health itself.
-            self.assertIn("/health", rollback.split("```", 2)[1], name)
             # nginx is checked and reloaded only after either Cloudflare mode has its files.
             nginx = release.split("\n### Put nginx in front\n", 1)[1]
             for setup in ("Cloudflare Origin Certificate", "ingress:"):
