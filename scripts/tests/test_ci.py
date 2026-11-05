@@ -1,12 +1,16 @@
 """Policy guards, not a YAML parser: actionlint validates the actual workflows."""
 
+import http.server
 import importlib.util
 import os
 from pathlib import Path
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 
@@ -476,9 +480,14 @@ class ContainerPolicyTest(unittest.TestCase):
             # Migrations run before the new release starts serving.
             self.assertLess(release.index("make compose-migrate"),
                             release.index("make compose-up"), name)
-            # An older migrate refuses a newer schema, so rollback never runs it.
+            # An older migrate refuses a newer schema, so rollback never runs it, in any form.
             self.assertIn("make compose-up", rollback, name)
-            self.assertNotIn("make compose-migrate\n", rollback, name)
+            self.assertNotIn("compose-migrate", rollback.split("```", 2)[1], name)
+            self.assertIn("Migrations are never undone", rollback, name)
+            # nginx is checked and reloaded only after either Cloudflare mode has its files.
+            nginx = release.split("\n### Put nginx in front\n", 1)[1]
+            for setup in ("Cloudflare Origin Certificate", "ingress:"):
+                self.assertLess(nginx.index(setup), nginx.index("nginx -t"), (name, setup))
 
     def test_compose_targets_stop_without_a_settings_file(self):
         makefile = (ROOT / "Makefile").read_text()
@@ -502,6 +511,79 @@ class ContainerPolicyTest(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True,
             env={"PATH": os.environ["PATH"], "SERVICE_ENV_FILE": str(settings)},
         )
+
+
+class ComposeHealthTest(unittest.TestCase):
+    """`make compose-up` ends with compose-health, because a restarting container passes `--wait`."""
+
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.directory)
+        # A fake docker records what the target asks for, so no test needs Docker.
+        bin_dir = self.directory / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "docker").write_text('#!/bin/sh\necho "$@" >> "$DOCKER_CALLS"\necho "service log line"\n')
+        (bin_dir / "docker").chmod(0o755)
+        self.path = f"{bin_dir}:{os.environ['PATH']}"
+        self.calls = self.directory / "docker-calls"
+        self.settings = self.directory / "service.env"
+
+    def serve_health(self):
+        class Health(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200 if self.path == "/health" else 404)
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Health)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def closed_port(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+
+    def compose_health(self, shell_port=None):
+        env = {"PATH": self.path, "SERVICE_ENV_FILE": str(self.settings),
+               "DOCKER_CALLS": str(self.calls), "COMPOSE_HEALTH_SECONDS": "2"}
+        if shell_port is not None:
+            env["PORT"] = str(shell_port)
+        return subprocess.run(["make", "--no-print-directory", "compose-health"],
+                              cwd=ROOT, capture_output=True, text=True, env=env)
+
+    def test_compose_up_ends_with_the_health_check(self):
+        recipe = subprocess.run(["make", "--no-print-directory", "-n", "compose-up"],
+                                cwd=ROOT, capture_output=True, text=True,
+                                env={"PATH": self.path, "SERVICE_ENV_FILE": str(self.settings)})
+        # `make -n` still runs the recursive make, so its health check recipe follows `up`.
+        lines = recipe.stdout.splitlines()
+        up = next(i for i, line in enumerate(lines) if "up --detach --no-build --wait" in line)
+        health = next(i for i, line in enumerate(lines) if '"http://127.0.0.1:$port/health"' in line)
+        self.assertLess(up, health)
+
+    def test_a_service_answering_health_passes(self):
+        self.settings.write_text(f'PORT="{self.serve_health()}"\nDATABASE_URL=postgres://x@h/db\n')
+        result = self.compose_health()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_a_shell_port_wins_over_the_settings_file(self):
+        self.settings.write_text(f"PORT={self.closed_port()}\n")
+        result = self.compose_health(shell_port=self.serve_health())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_service_that_never_answers_fails_with_its_log(self):
+        port = self.closed_port()
+        self.settings.write_text(f"PORT={port}\n")
+        result = self.compose_health()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"GET /health on 127.0.0.1:{port} did not return 200 within 2 s", result.stderr)
+        self.assertIn("service log line", result.stderr)
+        self.assertIn("logs --no-color --tail 50 service", self.calls.read_text())
 
 
 class GeneratedCiTest(unittest.TestCase):

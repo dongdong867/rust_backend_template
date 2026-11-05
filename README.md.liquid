@@ -112,25 +112,29 @@ SERVICE_ENV_FILE=.env.container make compose-up
 ```
 
 The service accepts connections only from this machine. Read its logs with `docker compose logs`.
+`make compose-up` fails, printing the service's log, unless `GET /health` answers within 30 seconds.
+The container then starts again with Docker, after a reboot too, until `make compose-down` removes it.
 These targets need Docker with Compose 2.24.0 or later; Colima is the tested local runtime.
 
 ## Deploy it
 
 This recipe runs one release on one VM with Docker Compose, behind nginx with Cloudflare in front.
-The VM builds the image from a release tag, so no image registry is needed.
+The VM builds the image from a release tag, so no image registry is needed; it compiles the service again for each deploy and rollback.
 
 ### Prepare the VM
 
-- Docker Engine with Compose 2.24.0 or later, started at boot, and a deploy user in the `docker` group. A VM with 2 CPUs and 2 GB of memory builds the image in about 2 minutes.
+- Docker Engine with Compose 2.24.0 or later, started at boot, a deploy user in the `docker` group, and `curl`.
 - nginx.
-- A PostgreSQL server the VM can reach, with the application's database created. Inside a container, `localhost` is the container, so a server on the VM itself must also listen on the Docker bridge and be reached as `host.docker.internal`. For TLS settings, see [Database transport and connection options](#database-transport-and-connection-options).
+- A PostgreSQL server on another host, or a managed one, that the VM can reach, with the application's database created. For TLS settings, see [Database transport and connection options](#database-transport-and-connection-options).
+  This recipe does not cover a PostgreSQL on the VM itself: a container reaches the VM only through Docker's networks, which needs PostgreSQL, `pg_hba.conf` and firewall changes the recipe has not tested.
 - A clone of this repository at `/srv/{{project-name}}`, owned by the deploy user.
 
-Keep the settings outside the checkout, readable only by the deploy user:
+Keep the settings outside the checkout, readable only by the deploy user. This creates the file only when it is missing:
 
 ```sh
 mkdir -p ~/.config/{{project-name}}
-install -m 600 /dev/null ~/.config/{{project-name}}/service.env
+f=~/.config/{{project-name}}/service.env
+[ -e "$f" ] || install -m 600 /dev/null "$f"
 # Set PORT and DATABASE_URL in it, and API_DOC_PASSWORD for an api-doc build.
 ```
 
@@ -143,25 +147,27 @@ git checkout v1.2.3
 export SERVICE_ENV_FILE=~/.config/{{project-name}}/service.env
 make compose-migrate
 make compose-up
-curl -fsS http://127.0.0.1:8080/health    # use your PORT; {"status":"ok"}
 ```
 
-`make compose-migrate` builds the image from the checked-out tag, then applies its migrations. `make compose-up` replaces the running container and waits until the new one runs, so requests fail for a few seconds.
-For an api-doc build, add `FEATURES=api-doc` to both `make` commands.
+`make compose-migrate` builds the image from the checked-out tag, then applies its migrations.
+`make compose-up` replaces the running container, so requests fail for a few seconds. It then fails, printing the service's log, unless `GET /health` answers within 30 seconds.
+For an api-doc build, add `FEATURES=api-doc` to every `make` command in this section, the rollback included.
 The service restarts after a crash or a reboot until `make compose-down` stops it, and Docker keeps at most 3 log files of 10 MB for it.
 
 ### Put nginx in front
 
 nginx forwards traffic to the service's `127.0.0.1` port, which stays closed to other machines.
+The block below assumes `PORT=8080`; put your `PORT` in `proxy_pass`.
 
 ```nginx
 # /etc/nginx/conf.d/{{project-name}}.conf
 server {
     # Proxied DNS: Cloudflare connects here over HTTPS with the origin certificate.
     listen 443 ssl;
+    listen [::]:443 ssl;
     ssl_certificate     /etc/ssl/cloudflare/origin.pem;
     ssl_certificate_key /etc/ssl/cloudflare/origin.key;
-    # Cloudflare Tunnel: replace the three lines above with `listen 127.0.0.1:80;`.
+    # Cloudflare Tunnel: replace the four lines above with `listen 127.0.0.1:80;`.
 
     server_name api.example.com;
     include /etc/nginx/cloudflare-real-ip.conf;
@@ -175,18 +181,9 @@ server {
 }
 ```
 
-So that nginx logs the client's address instead of Cloudflare's, write the include file from Cloudflare's published ranges, then reload:
+Set up Cloudflare in one of two ways:
 
-```sh
-{ for v in 4 6; do curl -fsS "https://www.cloudflare.com/ips-v$v" | awk 'NF { print "set_real_ip_from " $1 ";" }'; done
-  echo 'set_real_ip_from 127.0.0.1;'
-  echo 'real_ip_header CF-Connecting-IP;'; } | sudo tee /etc/nginx/cloudflare-real-ip.conf
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-Then set up Cloudflare in one of two ways:
-
-- **Proxied DNS.** Point a proxied DNS record at the VM, set SSL/TLS mode to Full (strict), and save a Cloudflare Origin Certificate and its key as the two files above, with the key at mode 600. Open port 443 to Cloudflare's ranges only.
+- **Proxied DNS.** Point a proxied DNS record at the VM, set SSL/TLS mode to Full (strict), and save a Cloudflare Origin Certificate and its key as the two files above, with the key at mode 600.
 - **Cloudflare Tunnel.** Use the `listen 127.0.0.1:80;` line, with no certificate and no open port. In the `cloudflared` configuration, forward the hostname to nginx:
 
   ```yaml
@@ -195,6 +192,30 @@ Then set up Cloudflare in one of two ways:
       service: http://127.0.0.1:80
     - service: http_status:404
   ```
+
+Then download Cloudflare's address ranges, so that nginx logs the client's address instead of Cloudflare's, and reload nginx.
+The commands stop at the first failure, so a failed download leaves the include file as it was:
+
+```sh
+cd "$(mktemp -d)"
+curl -fsS -o v4 https://www.cloudflare.com/ips-v4 && curl -fsS -o v6 https://www.cloudflare.com/ips-v6 &&
+  [ -s v4 ] && [ -s v6 ] &&
+  { awk 'NF { print "set_real_ip_from " $1 ";" }' v4 v6
+    echo 'set_real_ip_from 127.0.0.1;'
+    echo 'real_ip_header CF-Connecting-IP;'; } | sudo tee /etc/nginx/cloudflare-real-ip.conf >/dev/null &&
+  sudo nginx -t && sudo systemctl reload nginx
+```
+
+With proxied DNS, also open port 443 to those ranges only, from the same folder, so nobody reaches the VM around Cloudflare.
+With UFW, keep SSH open before enabling it; with a cloud firewall, allow the same ranges there instead:
+
+```sh
+sudo ufw allow OpenSSH
+for range in $(cat v4 v6); do sudo ufw allow proto tcp from "$range" to any port 443; done
+sudo ufw enable
+```
+
+Cloudflare rarely changes these ranges. When [its list](https://www.cloudflare.com/ips/) changes, run both blocks again and delete the firewall rules for ranges it no longer lists.
 
 ### Roll back
 
@@ -205,9 +226,9 @@ cd /srv/{{project-name}}
 git checkout v1.2.2
 export SERVICE_ENV_FILE=~/.config/{{project-name}}/service.env
 make compose-up
-curl -fsS http://127.0.0.1:8080/health
 ```
 
+`make compose-up` checks `GET /health` as it does on a deploy.
 Migrations are never undone, and an older `migrate` command refuses a database that has newer migrations.
 Roll back only to a release whose code works with the newer schema, which is why a migration should add columns and tables before a later release removes old ones.
 

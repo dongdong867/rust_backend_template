@@ -4,11 +4,12 @@ TAPLO_VERSION := 0.10.0
 CARGO_GENERATE_VERSION := 0.25.0
 ACTIONLINT_VERSION := 1.7.12
 FEATURES ?=
+COMPOSE_HEALTH_SECONDS ?= 30
 CARGO_FEATURES = $(if $(strip $(FEATURES)),--features "$(FEATURES)")
 IMAGE := rust-backend-template:local
 
 .DEFAULT_GOAL := help
-.PHONY: help run migrate build test test-crate test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version image compose-up compose-down compose-migrate compose-settings
+.PHONY: help run migrate build test test-crate test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version image compose-up compose-down compose-migrate compose-settings compose-health
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -44,6 +45,17 @@ compose-settings:
 
 compose-up: compose-settings image ## Run the service container against an existing PostgreSQL, reading .env or SERVICE_ENV_FILE
 	docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" up --detach --no-build --wait
+	@$(MAKE) --no-print-directory compose-health
+
+# A container that exits at startup restarts in a loop, which `--wait` counts as running,
+# so the start counts only once GET /health answers. PORT resolves as Compose resolves it.
+compose-health:
+	@port="$${PORT:-$$(sed -n 's/^PORT=//p' "$${SERVICE_ENV_FILE:-.env}" 2>/dev/null | tail -n 1 | tr -d "\"'")}"; port="$${port:-8080}"; \
+	for attempt in $$(seq $(COMPOSE_HEALTH_SECONDS)); do \
+	  curl -fs -o /dev/null "http://127.0.0.1:$$port/health" && exit 0; sleep 1; \
+	done; \
+	echo "GET /health on 127.0.0.1:$$port did not return 200 within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; \
+	docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" logs --no-color --tail 50 service >&2; exit 1
 
 compose-down: ## Stop and remove the service container
 	docker compose down
