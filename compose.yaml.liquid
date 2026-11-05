@@ -23,6 +23,14 @@ services:
       - 127.0.0.1:${PORT:-8080}:${PORT:-8080}
     # Longer than the server's 30-second shutdown timeout, so the pool closes before SIGKILL.
     stop_grace_period: 40s
+    # A deployed service comes back after a crash or a reboot, until `make compose-down`.
+    restart: unless-stopped
+    # Docker never rotates its default log, so cap it before it fills the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   # Runs only when asked: starting the service never applies migrations.
   migrate:

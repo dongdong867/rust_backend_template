@@ -459,6 +459,15 @@ class ContainerPolicyTest(unittest.TestCase):
         # One interpolated PORT sets the listener too, so a shell PORT cannot split the two.
         self.assertIn("    environment:\n      PORT: ${PORT:-8080}\n", service)
 
+    def test_a_deployed_service_restarts_and_keeps_its_logs_bounded(self):
+        services = blocks((ROOT / "compose.yaml").read_text(), "services")
+        self.assertIn("    restart: unless-stopped\n", services["service"])
+        self.assertIn('    logging:\n      driver: json-file\n      options:\n'
+                      '        max-size: 10m\n        max-file: "3"\n', services["service"])
+        # migrate runs once and is removed, so it neither restarts nor needs rotation.
+        for key in ("restart:", "logging:"):
+            self.assertNotIn(key, services["migrate"])
+
     def test_compose_targets_stop_without_a_settings_file(self):
         makefile = (ROOT / "Makefile").read_text()
         for target in ("compose-up", "compose-migrate"):
