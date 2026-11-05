@@ -468,6 +468,18 @@ class ContainerPolicyTest(unittest.TestCase):
         for key in ("restart:", "logging:"):
             self.assertNotIn(key, services["migrate"])
 
+    def test_the_readme_deploys_a_release_and_rolls_it_back(self):
+        for name in ("README.md", "README.md.liquid"):
+            text = (ROOT / name).read_text()
+            deploy = text.split("\n## Deploy it\n", 1)[1].split("\n## ", 1)[0]
+            release, rollback = deploy.split("\n### Roll back\n", 1)
+            # Migrations run before the new release starts serving.
+            self.assertLess(release.index("make compose-migrate"),
+                            release.index("make compose-up"), name)
+            # An older migrate refuses a newer schema, so rollback never runs it.
+            self.assertIn("make compose-up", rollback, name)
+            self.assertNotIn("make compose-migrate\n", rollback, name)
+
     def test_compose_targets_stop_without_a_settings_file(self):
         makefile = (ROOT / "Makefile").read_text()
         for target in ("compose-up", "compose-migrate"):
