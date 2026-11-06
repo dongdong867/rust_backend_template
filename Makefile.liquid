@@ -58,7 +58,7 @@ compose-health:
 	  [ -n "$$address" ] && curl -fs --max-time 2 -o /dev/null "http://$$address/health" && exit 0; sleep 1; \
 	done; \
 	if [ -n "$$seen" ]; then echo "GET http://$$seen/health did not return 200 within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; \
-	else echo "Docker reported no published port for the service within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; fi; \
+	else echo "No published address for the service was found within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; fi; \
 	docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" logs --no-color --tail 50 service >&2; exit 1
 
 compose-down: ## Stop and remove the service container

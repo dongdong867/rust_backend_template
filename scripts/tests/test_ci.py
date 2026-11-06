@@ -451,7 +451,7 @@ class ContainerPolicyTest(unittest.TestCase):
         tag = re.search(r"^FROM rust:(\d+\.\d+\.\d+)-", (ROOT / "Dockerfile").read_text(), re.M)
         self.assertEqual(tag.group(1), channel)
 
-    def test_compose_serves_only_this_machine_and_outlasts_shutdown(self):
+    def test_compose_outlasts_shutdown(self):
         service = blocks((ROOT / "compose.yaml").read_text(), "services")["service"]
         timeout = re.search(r"^pub const SHUTDOWN_TIMEOUT_SECS: u64 = (\d+);$",
                             (ROOT / "rust-backend-template/src/server.rs").read_text(), re.M)
@@ -563,9 +563,9 @@ class ComposeHealthTest(unittest.TestCase):
             probe.bind(("127.0.0.1", 0))
             return probe.getsockname()[1]
 
-    def compose_health(self, address):
+    def compose_health(self, address, seconds=2):
         env = {"PATH": self.path, "DOCKER_CALLS": str(self.calls), "FAKE_ADDRESS": address,
-               "COMPOSE_HEALTH_SECONDS": "2", "SERVICE_ENV_FILE": "/srv/settings.env"}
+               "COMPOSE_HEALTH_SECONDS": str(seconds), "SERVICE_ENV_FILE": "/srv/settings.env"}
         return subprocess.run(["make", "--no-print-directory", "compose-health"],
                               cwd=ROOT, capture_output=True, text=True, env=env, timeout=20)
 
@@ -608,12 +608,13 @@ class ComposeHealthTest(unittest.TestCase):
 
     def test_a_container_with_no_published_port_fails_with_its_log(self):
         started = time.monotonic()
-        result = self.compose_health("")
+        # The deadline counts whole seconds, so 3 s always leaves room for a second attempt.
+        result = self.compose_health("", seconds=3)
         self.assertNotEqual(result.returncode, 0)
         # A restarting container has no address yet, so the check keeps asking until the deadline.
-        self.assertGreaterEqual(time.monotonic() - started, 1)
+        self.assertGreaterEqual(time.monotonic() - started, 2)
         self.assertGreaterEqual(self.calls.read_text().count("port service 8080"), 2)
-        self.assertIn("Docker reported no published port for the service within 2 s", result.stderr)
+        self.assertIn("No published address for the service was found within 3 s", result.stderr)
         self.assertIn("service log line", result.stderr)
 
 
