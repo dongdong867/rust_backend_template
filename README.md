@@ -103,7 +103,7 @@ make compose-down      # stop and remove the service container
 ```
 
 Compose reads `.env`, or the file `SERVICE_ENV_FILE` names; `compose-up` and `compose-migrate` stop when that file is missing.
-An exported shell `PORT` overrides that file's `PORT`, both for the port the service listens on and for the published port.
+`PORT` picks the port on this machine; inside the container the service always listens on 8080. An exported shell `PORT` overrides the file's.
 Inside a container, `localhost` is the container itself, so reach PostgreSQL on this machine as `host.docker.internal`, for example `DATABASE_URL=postgres://<user>@host.docker.internal:5432/<database>`.
 `make run` needs `localhost`, so keep the container's settings in a second file, which Git and the image both ignore:
 
