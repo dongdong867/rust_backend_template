@@ -51,12 +51,14 @@ compose-up: compose-settings image ## Run the service container against an exist
 # so the start counts only once GET /health answers. Docker names the service's address;
 # a restarting container has none yet, which counts as not answering.
 compose-health:
-	@end=$$(( $$(date +%s) + $(COMPOSE_HEALTH_SECONDS) )); \
+	@end=$$(( $$(date +%s) + $(COMPOSE_HEALTH_SECONDS) )); seen=; \
 	while [ "$$(date +%s)" -lt "$$end" ]; do \
 	  address="$$(docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" port service 8080 2>/dev/null)"; \
+	  [ -z "$$address" ] || seen="$$address"; \
 	  [ -n "$$address" ] && curl -fs --max-time 2 -o /dev/null "http://$$address/health" && exit 0; sleep 1; \
 	done; \
-	echo "GET /health did not return 200 within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; \
+	if [ -n "$$seen" ]; then echo "GET http://$$seen/health did not return 200 within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; \
+	else echo "Docker reported no published port for the service within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; fi; \
 	docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" logs --no-color --tail 50 service >&2; exit 1
 
 compose-down: ## Stop and remove the service container

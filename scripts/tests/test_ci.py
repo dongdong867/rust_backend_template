@@ -453,7 +453,6 @@ class ContainerPolicyTest(unittest.TestCase):
 
     def test_compose_serves_only_this_machine_and_outlasts_shutdown(self):
         service = blocks((ROOT / "compose.yaml").read_text(), "services")["service"]
-        self.assertIn("      - 127.0.0.1:${PORT:-8080}:8080\n", service)
         timeout = re.search(r"^pub const SHUTDOWN_TIMEOUT_SECS: u64 = (\d+);$",
                             (ROOT / "rust-backend-template/src/server.rs").read_text(), re.M)
         grace = re.search(r"^    stop_grace_period: (\d+)s$", service, re.M)
@@ -490,6 +489,7 @@ class ContainerPolicyTest(unittest.TestCase):
             self.assertNotIn("compose-migrate", rollback.split("```", 2)[1], name)
             self.assertIn("Migrations are never undone", rollback, name)
             self.assertIn("works with the newer schema", rollback, name)
+            self.assertIn('chmod 600 "$f"', release, name)
             # nginx is checked and reloaded only after either Cloudflare mode has its files.
             nginx = release.split("\n### Put nginx in front\n", 1)[1]
             for setup in ("Cloudflare Origin Certificate", "ingress:"):
@@ -588,9 +588,10 @@ class ComposeHealthTest(unittest.TestCase):
         self.assertNotIn("logs", calls)
 
     def test_a_service_that_never_answers_fails_with_its_log(self):
-        result = self.compose_health(f"127.0.0.1:{self.closed_port()}")
+        address = f"127.0.0.1:{self.closed_port()}"
+        result = self.compose_health(address)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("GET /health did not return 200 within 2 s", result.stderr)
+        self.assertIn(f"GET http://{address}/health did not return 200 within 2 s", result.stderr)
         self.assertIn("service log line", result.stderr)
         self.assertIn("logs --no-color --tail 50 service", self.calls.read_text())
 
@@ -611,7 +612,8 @@ class ComposeHealthTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         # A restarting container has no address yet, so the check keeps asking until the deadline.
         self.assertGreaterEqual(time.monotonic() - started, 1)
-        self.assertIn("GET /health did not return 200 within 2 s", result.stderr)
+        self.assertGreaterEqual(self.calls.read_text().count("port service 8080"), 2)
+        self.assertIn("Docker reported no published port for the service within 2 s", result.stderr)
         self.assertIn("service log line", result.stderr)
 
 

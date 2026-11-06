@@ -129,12 +129,12 @@ The VM builds the image from a release tag, so no image registry is needed; it c
   This recipe does not cover a PostgreSQL on the VM itself: a container reaches the VM only through Docker's networks, which needs PostgreSQL, `pg_hba.conf` and firewall changes the recipe has not tested.
 - A clone of this repository at `/srv/rust-backend-template`, owned by the deploy user.
 
-Keep the settings outside the checkout, readable only by the deploy user. This creates the file only when it is missing:
+Keep the settings outside the checkout, readable only by the deploy user. Running this again keeps an existing file's contents:
 
 ```sh
 mkdir -p ~/.config/rust-backend-template
 f=~/.config/rust-backend-template/service.env
-[ -e "$f" ] || install -m 600 /dev/null "$f"
+touch "$f"
 chmod 600 "$f"
 # Set PORT and DATABASE_URL in it, and API_DOC_PASSWORD for an api-doc build.
 ```
@@ -152,7 +152,7 @@ make compose-up
 
 `make compose-migrate` builds the image from the checked-out tag, then applies its migrations.
 `make compose-up` replaces the running container, so requests fail for a few seconds. It then fails, printing the service's log, unless `GET /health` answers within 30 seconds.
-By then the old release is stopped: fix the settings and run `make compose-up` again, or follow [Roll back](#roll-back).
+By then the old release is stopped: read the log, then fix the settings and run `make compose-up` again, or follow [Roll back](#roll-back).
 For an api-doc build, add `FEATURES=api-doc` to every `make` command in this section, the rollback included.
 The service restarts after a crash or a reboot until `make compose-down` stops it, and Docker keeps at most 3 log files of 10 MB for it.
 

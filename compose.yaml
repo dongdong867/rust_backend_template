@@ -16,7 +16,7 @@ services:
   service:
     <<: *service
     # Inside, the service always listens on the port the image exposes; PORT picks the
-    # port on this machine, so Docker alone knows the mapping.
+    # port on this machine, and `make compose-health` asks Docker for that address.
     environment:
       PORT: "8080"
     ports:
