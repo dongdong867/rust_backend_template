@@ -176,6 +176,8 @@ def check_project(project, name, include_tasks):
             "The PostgreSQL database settings were removed.")
     require("DATABASE_ACQUIRE_TIMEOUT_SECS=10" in example_text.splitlines(),
             ".example.env must list DATABASE_ACQUIRE_TIMEOUT_SECS=10.")
+    require("DATABASE_STATEMENT_TIMEOUT_SECS=10" in example_text.splitlines(),
+            ".example.env must list DATABASE_STATEMENT_TIMEOUT_SECS=10.")
     require((project / "crates/tasks").is_dir() == include_tasks,
             "The tasks crate does not match the prompt.")
     require((project / "migrations/0001_create_tasks.sql").is_file() == include_tasks,
@@ -245,6 +247,7 @@ def cargo_environment():
     # Keep TEST_DATABASE_URL: it deliberately selects the dedicated test server.
     for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL",
                     "DATABASE_MAX_CONNECTIONS", "DATABASE_ACQUIRE_TIMEOUT_SECS",
+                    "DATABASE_STATEMENT_TIMEOUT_SECS",
                     "PORT", "RUST_LOG", "LOG_FORMAT",
                     "HTTP_CORS_ENABLED", "HTTP_CORS_ALLOWED_ORIGINS",
                     "HTTP_REQUEST_TIMEOUT_SECS", "HTTP_REQUEST_BODY_LIMIT_BYTES"):
