@@ -23,7 +23,7 @@ allow = [
   "BSL-1.0",
   "Unlicense",
 ]
-# A generated service without the tasks example may use fewer of them.
+# A generated service may need fewer of them, so an unused one is not reported.
 unused-allowed-license = "allow"
 
 [licenses.private]
