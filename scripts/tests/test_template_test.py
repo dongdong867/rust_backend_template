@@ -117,12 +117,13 @@ class TemplateChecksTest(unittest.TestCase):
             }):
                 for project in (self.source, self.output):
                     template_test.check_generated(project, fast_only=fast_only)
-                targets = ["lint", "audit", "test"] if fast_only else ["check"]
-                self.assertEqual(
-                    [call.args[0] for call in run.call_args_list],
-                    [["make", *targets, f"FEATURES={feature}"]
-                     for _ in range(2) for feature in ("", "api-doc")],
-                )
+                targets = ["lint", "test"] if fast_only else ["check"]
+                # The audit ignores FEATURES, so fast mode runs it once per variant.
+                variant = [["make", *targets, f"FEATURES={feature}"]
+                           for feature in ("", "api-doc")]
+                if fast_only:
+                    variant.append(["make", "audit"])
+                self.assertEqual([call.args[0] for call in run.call_args_list], variant * 2)
                 for call in run.call_args_list:
                     self.assertTrue(call.kwargs["check"])
                     for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL",
@@ -131,8 +132,9 @@ class TemplateChecksTest(unittest.TestCase):
                         self.assertFalse(setting in call.kwargs["env"], setting)
                     self.assertEqual(call.kwargs["env"]["CARGO_TARGET_DIR"],
                                      str(template_test.ROOT / "target/template-test"))
+                calls = len(variant)
                 self.assertEqual([call.kwargs["cwd"] for call in run.call_args_list],
-                                 [self.source, self.source, self.output, self.output])
+                                 [self.source] * calls + [self.output] * calls)
 
     def test_structure_only_does_not_run_make(self):
         with patch.object(template_test.subprocess, "run") as run:

@@ -261,9 +261,12 @@ def check_generated(project, *, fast_only=False, structure_only=False):
     if structure_only:
         return
     environment = cargo_environment()
-    targets = ["lint", "audit", "test"] if fast_only else ["check"]
-    for feature in ("", "api-doc"):
-        command = ["make", *targets, f"FEATURES={feature}"]
+    targets = ["lint", "test"] if fast_only else ["check"]
+    commands = [["make", *targets, f"FEATURES={feature}"] for feature in ("", "api-doc")]
+    if fast_only:
+        # The audit ignores FEATURES. It runs last so lint and test results report first.
+        commands.append(["make", "audit"])
+    for command in commands:
         print("+", " ".join(command), flush=True)
         subprocess.run(command, cwd=project, env=environment, check=True)
 
