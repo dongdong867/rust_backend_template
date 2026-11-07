@@ -33,7 +33,8 @@ unused-allowed-license = "allow"
 ignore = true
 
 [bans]
-multiple-versions = "warn"
+# Duplicate crate versions are not reported, so warnings cannot hide a failure.
+multiple-versions = "allow"
 
 [sources]
 unknown-registry = "deny"

@@ -544,8 +544,9 @@ class AuditPolicyTest(unittest.TestCase):
         for manifest in manifests:
             self.assertIn("\npublish = false\n", manifest.read_text(), manifest)
 
-    def test_duplicate_versions_only_warn(self):
-        self.assertIn('multiple-versions = "warn"\n', self.policy["bans"])
+    def test_duplicate_versions_are_not_reported(self):
+        # Duplicate warnings filled the audit output and hid its errors.
+        self.assertIn('multiple-versions = "allow"\n', self.policy["bans"])
 
     def test_crates_come_only_from_crates_io(self):
         sources = self.policy["sources"]
