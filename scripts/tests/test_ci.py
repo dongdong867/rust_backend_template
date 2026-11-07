@@ -76,6 +76,29 @@ class CiPolicyTest(unittest.TestCase):
         self.assertLess(install, audit)
         self.assertLess(audit, validate.index("make template-test-fast"))
 
+    def test_audit_runs_weekly_and_by_hand_on_the_default_branch(self):
+        text = self.workflow("audit.yml")
+        triggers = text.split("\non:\n", 1)[1].split("\n\n", 1)[0]
+        # A schedule runs on the default branch's latest commit.
+        self.assertEqual(triggers, '  schedule:\n    - cron: "17 6 * * 1"\n  workflow_dispatch:')
+        self.assertEqual(text.split("\npermissions:\n", 1)[1].split("\n\n", 1)[0],
+                         "  contents: read")
+        self.assertNotRegex(text, r"(?m)^\s+[\w-]+: write$")
+        self.assertNotIn("secrets.", text)
+        self.assertNotIn("continue-on-error", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertRegex(text, r"timeout-minutes: \d+")
+        for action in re.findall(r"^\s+(?:- )?uses: ([^\s]+)", text, re.M):
+            self.assertRegex(action, r"^[\w./-]+@[a-f0-9]{40}$")
+        steps = re.split(r"\n(?=      - )", jobs(text)["audit"])
+        self.assertEqual(len(steps), 6)
+        self.assertIn("uses: actions/checkout@", steps[1])
+        self.assertIn("run: make --no-print-directory tool-versions >> \"$GITHUB_OUTPUT\"", steps[2])
+        self.assertIn("run: rustup show active-toolchain", steps[3])
+        self.assertIn("tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}\n"
+                      "          fallback: none", steps[4])
+        self.assertEqual(steps[5], "      - name: Audit dependencies\n        run: make audit\n")
+
     def test_permissions_pins_concurrency_and_timeouts(self):
         for name in ("format.yml", "template-ci.yml"):
             with self.subTest(name=name):
@@ -366,6 +389,7 @@ class CiPolicyTest(unittest.TestCase):
         excluded = (ROOT / ".genignore").read_text().splitlines()
         self.assertIn("/.github/workflows/template-ci.yml", excluded)
         self.assertNotIn("/.github/workflows/format.yml", excluded)
+        self.assertNotIn("/.github/workflows/audit.yml", excluded)
         self.assertNotIn("/.github/dependabot.yml", excluded)
         config = (ROOT / "cargo-generate.toml").read_text()
         self.assertNotIn('".github/', config)
@@ -743,6 +767,7 @@ class GeneratedCiTest(unittest.TestCase):
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
             ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
+            ".github/workflows/audit.yml",
         )
         for name in self.files:
             for root in (self.source, self.project):
