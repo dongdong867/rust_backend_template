@@ -260,7 +260,7 @@ def check_generated(project, *, fast_only=False, structure_only=False):
     if structure_only:
         return
     environment = cargo_environment()
-    targets = ["lint", "test"] if fast_only else ["check"]
+    targets = ["lint", "audit", "test"] if fast_only else ["check"]
     for feature in ("", "api-doc"):
         command = ["make", *targets, f"FEATURES={feature}"]
         print("+", " ".join(command), flush=True)
@@ -315,7 +315,7 @@ def main():
     checks.add_argument("--structure-only", action="store_true",
                         help="Check generation and locks only; do not claim full make check coverage.")
     checks.add_argument("--fast-only", action="store_true",
-                        help="Also lint and test generated code, but omit real PostgreSQL checks.")
+                        help="Also lint, audit and test generated code, but omit real PostgreSQL checks.")
     args = parser.parse_args()
     if not args.structure_only and not args.fast_only:
         require(os.environ.get("TEST_DATABASE_URL"),
@@ -341,7 +341,7 @@ def main():
     if args.structure_only:
         print("Generation structure and locked metadata passed; full make check was NOT run.")
     elif args.fast_only:
-        print("Both generated variants passed default and api-doc lint and fast tests; "
+        print("Both generated variants passed default and api-doc lint, audit and fast tests; "
               "PostgreSQL checks were NOT run.")
     else:
         print("Template twins and both generated variants passed default and api-doc full make check.")

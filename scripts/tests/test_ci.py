@@ -66,6 +66,16 @@ class CiPolicyTest(unittest.TestCase):
         for command in ("make build", "cargo check", "make test-db", "DATABASE_URL"):
             self.assertNotIn(command, text)
 
+    def test_source_validation_audits_dependencies(self):
+        validate = jobs(self.workflow("template-ci.yml"))["validate"]
+        install = validate.index("      - name: Install prebuilt cargo-deny\n")
+        self.assertIn("tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}\n"
+                      "          fallback: none\n", validate[install:])
+        audit = validate.index("        run: make audit\n")
+        self.assertLess(validate.index("id: tools"), install)
+        self.assertLess(install, audit)
+        self.assertLess(audit, validate.index("make template-test-fast"))
+
     def test_permissions_pins_concurrency_and_timeouts(self):
         for name in ("format.yml", "template-ci.yml"):
             with self.subTest(name=name):

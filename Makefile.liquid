@@ -71,7 +71,7 @@ compose-migrate: compose-settings image ## Apply migrations from the image, read
 {% if template_source %}template-test: ## Generate both variants and run their full checks (requires TEST_DATABASE_URL)
 	python3 scripts/template_test.py
 
-template-test-fast: ## Generate both variants and run lint and fast tests without PostgreSQL
+template-test-fast: ## Generate both variants and run lint, audit and fast tests without PostgreSQL
 	python3 scripts/template_test.py --fast-only
 
 template-tools: ## Install the pinned generator locally for template verification
