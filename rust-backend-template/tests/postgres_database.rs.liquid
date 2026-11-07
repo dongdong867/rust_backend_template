@@ -1,6 +1,7 @@
 //! Real-server smoke coverage for the feature-independent database scaffold.
 
-use std::process::{Command, Stdio};
+use std::io;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -294,6 +295,32 @@ async fn migrate_finishes_a_step_that_waits_longer_than_the_statement_timeout() 
     .await;
 }
 
+/// A running `migrate` that is killed and reaped if the test returns before waiting for it, so it
+/// cannot keep a session on the database the test drops.
+struct MigrateRun(Option<Child>);
+
+impl MigrateRun {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.0.as_mut().map_or(Ok(None), Child::try_wait)
+    }
+
+    fn wait_with_output(mut self) -> io::Result<Output> {
+        self.0
+            .take()
+            .ok_or_else(|| io::Error::other("migrate was already waited for"))?
+            .wait_with_output()
+    }
+}
+
+impl Drop for MigrateRun {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// Runs `migrate` once, then again while another session holds a lock on `_sqlx_migrations`
 /// for 2 seconds, so a migration step waits longer than the 1-second statement timeout.
 async fn migrate_behind_a_lock(database_url: &str) -> Result<(), &'static str> {
@@ -314,9 +341,11 @@ async fn migrate_behind_a_lock(database_url: &str) -> Result<(), &'static str> {
         .execute(&mut *lock)
         .await
         .map_err(|_| "could not lock _sqlx_migrations")?;
-    let mut child = migrate_command(database_url)
-        .spawn()
-        .map_err(|_| "could not run migrate")?;
+    let mut child = MigrateRun(Some(
+        migrate_command(database_url)
+            .spawn()
+            .map_err(|_| "could not run migrate")?,
+    ));
     actix_web::rt::time::sleep(Duration::from_secs(2)).await;
     let waited = child
         .try_wait()
