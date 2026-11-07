@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{Connection, PgConnection, PgPool};
 use tasks::{
     adapter::repository::TaskRepositoryImpl,
     application::{
@@ -272,4 +274,60 @@ async fn postgres_task_repository_contract(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(boundary.title().chars().count(), 200);
+}
+
+#[ignore = "requires TEST_DATABASE_URL; run make test-db"]
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_save_blocked_past_the_statement_timeout_is_a_persistence_failure(
+    pool_options: PgPoolOptions,
+    connect_options: PgConnectOptions,
+) {
+    // The service's pool sends this option for DATABASE_STATEMENT_TIMEOUT_SECS=1.
+    let pool = pool_options
+        .connect_with(
+            connect_options
+                .clone()
+                .options([("statement_timeout", "1000")]),
+        )
+        .await
+        .unwrap();
+    let repository =
+        TaskRepositoryImpl::new(Arc::new(PostgresTaskStorageProvider::new(pool.clone())));
+    let mut other_session = PgConnection::connect_with(&connect_options).await.unwrap();
+    let mut lock = other_session.begin().await.unwrap();
+    sqlx::query("LOCK TABLE tasks IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+
+    let started = Instant::now();
+    let result = repository
+        .create(Task::new("blocked".into()).unwrap())
+        .await;
+    let elapsed = started.elapsed();
+    assert_eq!(result, Err(TaskRepositoryError::Persistence));
+    assert!(
+        (Duration::from_millis(900)..Duration::from_millis(1900)).contains(&elapsed),
+        "failed after {elapsed:?}"
+    );
+    // The provider receives PostgreSQL's query_canceled code, which it logs as statement_timeout.
+    let error = sqlx::query("SELECT count(*) FROM tasks")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("57014")
+    );
+
+    lock.rollback().await.unwrap();
+    other_session.close().await.unwrap();
+    let saved = repository
+        .create(Task::new("after the lock".into()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(repository.get(saved.id()).await.unwrap(), saved);
 }

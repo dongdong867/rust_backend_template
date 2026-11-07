@@ -25,7 +25,15 @@ impl PostgresTaskStorageProvider {
 
     /// The fixed log reason for a database failure that operators need to tell apart.
     fn failure_reason(error: &sqlx::Error) -> Option<&'static str> {
-        matches!(error, sqlx::Error::PoolTimedOut).then_some("pool_timeout")
+        match error {
+            sqlx::Error::PoolTimedOut => Some("pool_timeout"),
+            // SQLSTATE 57014 is query_canceled, which PostgreSQL reports when the statement
+            // timeout ends a query. A query an administrator cancels has the same code.
+            sqlx::Error::Database(error) if error.code().as_deref() == Some("57014") => {
+                Some("statement_timeout")
+            }
+            _ => None,
+        }
     }
 }
 
@@ -100,9 +108,55 @@ impl TaskStorageProvider for PostgresTaskStorageProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::borrow::Cow;
+    use std::error::Error;
+    use std::{fmt, io};
+
+    use sqlx::error::{DatabaseError, ErrorKind};
 
     use super::PostgresTaskStorageProvider;
+
+    /// A database error that carries only a SQLSTATE code, standing in for PostgreSQL's.
+    #[derive(Debug)]
+    struct CodedDatabaseError(Option<&'static str>);
+
+    impl fmt::Display for CodedDatabaseError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("synthetic database error")
+        }
+    }
+
+    impl Error for CodedDatabaseError {}
+
+    impl DatabaseError for CodedDatabaseError {
+        fn message(&self) -> &str {
+            "synthetic database error"
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            self.0.map(Cow::Borrowed)
+        }
+
+        fn as_error(&self) -> &(dyn Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
+
+    fn database_error(code: Option<&'static str>) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(CodedDatabaseError(code)))
+    }
 
     #[test]
     fn a_pool_timeout_has_the_pool_timeout_reason() {
@@ -113,11 +167,22 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_statement_has_the_statement_timeout_reason() {
+        assert_eq!(
+            PostgresTaskStorageProvider::failure_reason(&database_error(Some("57014"))),
+            Some("statement_timeout")
+        );
+    }
+
+    #[test]
     fn other_database_failures_have_no_reason() {
         for error in [
             sqlx::Error::PoolClosed,
             sqlx::Error::RowNotFound,
             sqlx::Error::Io(io::Error::from(io::ErrorKind::ConnectionReset)),
+            database_error(Some("23514")),
+            database_error(Some("57P01")),
+            database_error(None),
         ] {
             assert_eq!(
                 PostgresTaskStorageProvider::failure_reason(&error),
