@@ -10,7 +10,7 @@ use actix_web::http::header::CONTENT_TYPE;
 {% endif %}use actix_web::{http::StatusCode, test};
 use environment::{% if include_tasks %}{Config, LogFormat}{% else %}Config{% endif %};
 use {{crate_name}}::{
-    container::Container, create_app::create_app, database::create_pool, providers::Providers,
+    container::Container, create_app::create_app, database::{create_migration_pool, create_pool}, providers::Providers,
 {% if include_tasks %}    telemetry,
 {% endif %}};
 {% if include_tasks %}use serde_json::{Value, json};
@@ -68,6 +68,32 @@ async fn the_pool_uses_the_configured_acquire_timeout_and_10_seconds_by_default(
         );
         assert_eq!(database.size(), 0);
         database.close().await;
+    }
+}
+
+#[actix_web::test]
+async fn the_service_pool_sets_the_statement_timeout_and_the_migration_pool_does_not() {
+    let (closed, _port) = closed_port_config(None);
+    for (value, startup_options) in [
+        (None, "-c statement_timeout=10000"),
+        (Some("1"), "-c statement_timeout=1000"),
+    ] {
+        let config = Config::from_lookup(|name| match name {
+            "DATABASE_URL" => Some(closed.database.url.as_str().to_owned()),
+            "DATABASE_STATEMENT_TIMEOUT_SECS" => value.map(str::to_owned),
+            "API_DOC_PASSWORD" => Some("documentation-test-password".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let database = create_pool(&config.database).unwrap();
+        assert_eq!(
+            database.connect_options().get_options(),
+            Some(startup_options)
+        );
+        database.close().await;
+        let migration = create_migration_pool(&config.database).unwrap();
+        assert_eq!(migration.connect_options().get_options(), None);
+        migration.close().await;
     }
 }
 
