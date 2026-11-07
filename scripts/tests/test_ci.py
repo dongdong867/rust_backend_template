@@ -84,7 +84,8 @@ class CiPolicyTest(unittest.TestCase):
         audit = validate.index("        run: make audit\n")
         self.assertLess(validate.index("id: tools"), install)
         self.assertLess(install, audit)
-        self.assertLess(audit, validate.index("make template-test-fast"))
+        # Clippy, tests and the generated variants report before an advisory fails the job.
+        self.assertLess(validate.index("make template-test-fast"), audit)
         self.assertEqual(audit_steps(validate), [AUDIT_STEP])
 
     def test_audit_runs_weekly_and_by_hand_on_the_default_branch(self):

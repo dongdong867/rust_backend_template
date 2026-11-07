@@ -75,8 +75,6 @@ jobs:
       - name: Check main formatting
         if: github.event_name == 'push'
         run: make fmt-check fmt-toml-check
-      - name: Audit dependencies
-        run: make audit
       - name: Clippy for all targets and features
         run: make clippy
       - name: Default compilation and fast tests
@@ -85,3 +83,5 @@ jobs:
         run: make test FEATURES=api-doc
       - name: Both generated variants and feature modes
         run: make template-test-fast
+      - name: Audit dependencies
+        run: make audit
