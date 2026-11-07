@@ -26,14 +26,19 @@ use tokio::net::TcpSocket;
 /// The returned socket holds the port without listening, so every connection fails
 /// (Linux refuses it; macOS drops it) and nothing else can bind the port while the caller holds it.
 fn closed_port_config(acquire_timeout: Option<&str>) -> (Config, TcpSocket) {
+    closed_port_config_with("DATABASE_ACQUIRE_TIMEOUT_SECS", acquire_timeout)
+}
+
+/// Like [`closed_port_config`], but `value` sets the timeout setting named `setting`.
+fn closed_port_config_with(setting: &str, value: Option<&str>) -> (Config, TcpSocket) {
     let socket = TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = socket.local_addr().unwrap();
     let url = format!("postgres://closed_probe@{address}/closed_probe");
     let config = Config::from_lookup(|name| match name {
         "DATABASE_URL" => Some(url.clone()),
-        "DATABASE_ACQUIRE_TIMEOUT_SECS" => acquire_timeout.map(str::to_owned),
         "API_DOC_PASSWORD" => Some("documentation-test-password".to_owned()),
+        _ if name == setting => value.map(str::to_owned),
         _ => None,
     })
     .unwrap();
@@ -76,18 +81,11 @@ async fn the_pool_uses_the_configured_acquire_timeout_and_10_seconds_by_default(
 
 #[actix_web::test]
 async fn the_service_pool_sets_the_statement_timeout_and_the_migration_pool_does_not() {
-    let (closed, _port) = closed_port_config(None);
     for (value, startup_options) in [
         (None, "-c statement_timeout=10000"),
         (Some("1"), "-c statement_timeout=1000"),
     ] {
-        let config = Config::from_lookup(|name| match name {
-            "DATABASE_URL" => Some(closed.database.url.as_str().to_owned()),
-            "DATABASE_STATEMENT_TIMEOUT_SECS" => value.map(str::to_owned),
-            "API_DOC_PASSWORD" => Some("documentation-test-password".to_owned()),
-            _ => None,
-        })
-        .unwrap();
+        let (config, _port) = closed_port_config_with("DATABASE_STATEMENT_TIMEOUT_SECS", value);
         let database = create_pool(&config.database).unwrap();
         assert_eq!(
             database.connect_options().get_options(),
