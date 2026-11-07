@@ -321,6 +321,46 @@ impl Drop for MigrateRun {
     }
 }
 
+/// Waits until a session on the database `options` names waits on a lock. Fails if `migrate`
+/// exits first or 10 seconds pass.
+async fn wait_until_a_session_waits_on_a_lock(
+    options: &PgConnectOptions,
+    migrate: &mut MigrateRun,
+) -> Result<(), &'static str> {
+    let mut watcher = PgConnection::connect_with(options)
+        .await
+        .map_err(|_| "watch session could not connect")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        // Each query is its own transaction, so it sees current activity.
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock')",
+        )
+        .fetch_one(&mut watcher)
+        .await
+        .map_err(|_| "could not read pg_stat_activity")?;
+        if waiting {
+            break;
+        }
+        if migrate
+            .try_wait()
+            .map_err(|_| "could not poll migrate")?
+            .is_some()
+        {
+            return Err("migrate exited before it waited on the lock");
+        }
+        if Instant::now() >= deadline {
+            return Err("migrate did not wait on the lock within 10 seconds");
+        }
+        actix_web::rt::time::sleep(Duration::from_millis(20)).await;
+    }
+    watcher
+        .close()
+        .await
+        .map_err(|_| "could not close the watch session")
+}
+
 /// Runs `migrate` once, then again while another session holds a lock on `_sqlx_migrations`
 /// for 2 seconds, so a migration step waits longer than the 1-second statement timeout.
 async fn migrate_behind_a_lock(database_url: &str) -> Result<(), &'static str> {
@@ -346,6 +386,8 @@ async fn migrate_behind_a_lock(database_url: &str) -> Result<(), &'static str> {
             .spawn()
             .map_err(|_| "could not run migrate")?,
     ));
+    // Start the 2-second hold once migrate waits, so its start-up and connection do not count.
+    wait_until_a_session_waits_on_a_lock(&options, &mut child).await?;
     actix_web::rt::time::sleep(Duration::from_secs(2)).await;
     let waited = child
         .try_wait()
