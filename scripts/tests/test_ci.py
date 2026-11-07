@@ -385,6 +385,18 @@ class CiPolicyTest(unittest.TestCase):
         for name in ("AGENTS.md", "AGENTS.md.liquid"):
             self.assertIn("add its test binary to the `test-db` target", (ROOT / name).read_text(), name)
 
+    def test_guidance_describes_the_audit(self):
+        for name in ("AGENTS.md", "AGENTS.md.liquid"):
+            text = (ROOT / name).read_text()
+            self.assertIn("it includes lint, the dependency audit, fast tests and real database tests",
+                          text, name)
+            self.assertIn("`make audit`", text, name)
+        for name in ("README.md", "README.md.liquid"):
+            text = (ROOT / name).read_text()
+            self.assertIn("`.github/workflows/audit.yml`", text, name)
+            # GitHub stops running a public repository's schedules after 60 days without activity.
+            self.assertIn("after 60 days without activity", text, name)
+
     def test_only_source_workflow_is_excluded_from_generation(self):
         excluded = (ROOT / ".genignore").read_text().splitlines()
         self.assertIn("/.github/workflows/template-ci.yml", excluded)
