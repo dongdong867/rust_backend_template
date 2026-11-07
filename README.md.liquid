@@ -53,6 +53,7 @@ The empty allowlist permits no cross-origin browser access; CORS is not authenti
 `DATABASE_ACQUIRE_TIMEOUT_SECS` (whole seconds from 1 to 300, default 10) bounds how long a request waits for a database connection; at or above the request deadline, a request still waiting for a connection ends with 504 at that deadline instead.
 `DATABASE_STATEMENT_TIMEOUT_SECS` (whole seconds from 1 to 300, default 10) sets PostgreSQL's `statement_timeout` on each service connection: PostgreSQL cancels a query that runs longer, and its request gets 500.
 It overrides a `statement_timeout` in `DATABASE_URL`. Keep it below `HTTP_REQUEST_TIMEOUT_SECS`, or a query can keep its connection after its request has ended.
+A cancelled query logs the reason `statement_timeout`. PostgreSQL reports a query cancelled by hand, such as with `pg_cancel_backend`, the same way, so it logs that reason too.
 `make migrate` does not apply this setting, so a long migration, such as building an index, can finish.
 The limit is sent as a connection startup option, which a connection pooler such as PgBouncer can refuse or drop; check yours before relying on the limit.
 
