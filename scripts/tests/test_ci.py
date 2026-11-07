@@ -1,12 +1,18 @@
 """Policy guards, not a YAML parser: actionlint validates the actual workflows."""
 
+import http.server
 import importlib.util
 import os
 from pathlib import Path
 import re
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
+import threading
+import time
 import unittest
 
 
@@ -445,19 +451,49 @@ class ContainerPolicyTest(unittest.TestCase):
         tag = re.search(r"^FROM rust:(\d+\.\d+\.\d+)-", (ROOT / "Dockerfile").read_text(), re.M)
         self.assertEqual(tag.group(1), channel)
 
-    def test_compose_serves_only_this_machine_and_outlasts_shutdown(self):
+    def test_compose_outlasts_shutdown(self):
         service = blocks((ROOT / "compose.yaml").read_text(), "services")["service"]
-        self.assertIn("      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}\n", service)
         timeout = re.search(r"^pub const SHUTDOWN_TIMEOUT_SECS: u64 = (\d+);$",
                             (ROOT / "rust-backend-template/src/server.rs").read_text(), re.M)
         grace = re.search(r"^    stop_grace_period: (\d+)s$", service, re.M)
         # The pool closes after the server's shutdown timeout, so stopping needs more time.
         self.assertGreater(int(grace.group(1)), int(timeout.group(1)))
 
-    def test_one_port_sets_the_listener_and_the_published_port(self):
+    def test_the_container_listens_on_8080_and_port_picks_the_host_port(self):
         service = blocks((ROOT / "compose.yaml").read_text(), "services")["service"]
-        # One interpolated PORT sets the listener too, so a shell PORT cannot split the two.
-        self.assertIn("    environment:\n      PORT: ${PORT:-8080}\n", service)
+        # Inside, the service always listens on the port the image exposes; PORT maps the host side.
+        self.assertIn('    environment:\n      PORT: "8080"\n', service)
+        self.assertIn("      - 127.0.0.1:${PORT:-8080}:8080\n", service)
+        self.assertRegex((ROOT / "Dockerfile").read_text(), r"(?m)^EXPOSE 8080$")
+        self.assertIn(" port service 8080", (ROOT / "Makefile").read_text())
+
+    def test_a_deployed_service_restarts_and_keeps_its_logs_bounded(self):
+        services = blocks((ROOT / "compose.yaml").read_text(), "services")
+        self.assertIn("    restart: unless-stopped\n", services["service"])
+        self.assertIn('    logging:\n      driver: json-file\n      options:\n'
+                      '        max-size: 10m\n        max-file: "3"\n', services["service"])
+        # migrate runs once and is removed, so it neither restarts nor needs rotation.
+        for key in ("restart:", "logging:"):
+            self.assertNotIn(key, services["migrate"])
+
+    def test_the_readme_deploys_a_release_and_rolls_it_back(self):
+        for name in ("README.md", "README.md.liquid"):
+            text = (ROOT / name).read_text()
+            deploy = text.split("\n## Deploy it\n", 1)[1].split("\n## ", 1)[0]
+            release, rollback = deploy.split("\n### Roll back\n", 1)
+            # Migrations run before the new release starts serving.
+            self.assertLess(release.index("make compose-migrate"),
+                            release.index("make compose-up"), name)
+            # An older migrate refuses a newer schema, so rollback never runs it, in any form.
+            self.assertIn("make compose-up", rollback, name)
+            self.assertNotIn("compose-migrate", rollback.split("```", 2)[1], name)
+            self.assertIn("Migrations are never undone", rollback, name)
+            self.assertIn("works with the newer schema", rollback, name)
+            self.assertIn('chmod 600 "$f"', release, name)
+            # nginx is checked and reloaded only after either Cloudflare mode has its files.
+            nginx = release.split("\n### Put nginx in front\n", 1)[1]
+            for setup in ("Cloudflare Origin Certificate", "ingress:"):
+                self.assertLess(nginx.index(setup), nginx.index("nginx -t"), (name, setup))
 
     def test_compose_targets_stop_without_a_settings_file(self):
         makefile = (ROOT / "Makefile").read_text()
@@ -481,6 +517,105 @@ class ContainerPolicyTest(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True,
             env={"PATH": os.environ["PATH"], "SERVICE_ENV_FILE": str(settings)},
         )
+
+
+class ComposeHealthTest(unittest.TestCase):
+    """`make compose-up` ends with compose-health, because a restarting container passes `--wait`."""
+
+    FAKE_DOCKER = textwrap.dedent("""\
+        #!/bin/sh
+        # Records each call. `compose port` prints the service's host address, or nothing while
+        # the container has no published port (as when it is restarting); `logs` prints a line.
+        echo "$@" >> "$DOCKER_CALLS"
+        case " $* " in
+          *" port service 8080 "*) [ -z "$FAKE_ADDRESS" ] || echo "$FAKE_ADDRESS" ;;
+          *" logs "*) echo "service log line" ;;
+        esac
+        """)
+
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.directory)
+        bin_dir = self.directory / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "docker").write_text(self.FAKE_DOCKER)
+        (bin_dir / "docker").chmod(0o755)
+        self.path = f"{bin_dir}:{os.environ['PATH']}"
+        self.calls = self.directory / "docker-calls"
+
+    def serve_health(self):
+        class Health(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200 if self.path == "/health" else 404)
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Health)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def closed_port(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+
+    def compose_health(self, address, seconds=2):
+        env = {"PATH": self.path, "DOCKER_CALLS": str(self.calls), "FAKE_ADDRESS": address,
+               "COMPOSE_HEALTH_SECONDS": str(seconds), "SERVICE_ENV_FILE": "/srv/settings.env"}
+        return subprocess.run(["make", "--no-print-directory", "compose-health"],
+                              cwd=ROOT, capture_output=True, text=True, env=env, timeout=20)
+
+    def test_compose_up_ends_with_the_health_check(self):
+        recipe = subprocess.run(["make", "--no-print-directory", "-n", "compose-up"],
+                                cwd=ROOT, capture_output=True, text=True,
+                                env={"PATH": self.path, "SERVICE_ENV_FILE": "/dev/null"})
+        # `make -n` still runs the recursive make, so its health check recipe follows `up`.
+        lines = recipe.stdout.splitlines()
+        up = next(i for i, line in enumerate(lines) if "up --detach --no-build --wait" in line)
+        health = next(i for i, line in enumerate(lines) if '"http://$address/health"' in line)
+        self.assertLess(up, health)
+
+    def test_the_service_answering_health_passes(self):
+        result = self.compose_health(f"127.0.0.1:{self.serve_health()}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls.read_text()
+        # Docker names the address, for this service only, with the deploy's own settings file.
+        self.assertIn("compose --env-file /srv/settings.env port service 8080", calls)
+        self.assertNotIn("logs", calls)
+
+    def test_a_service_that_never_answers_fails_with_its_log(self):
+        address = f"127.0.0.1:{self.closed_port()}"
+        result = self.compose_health(address)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"GET http://{address}/health did not return 200 within 2 s", result.stderr)
+        self.assertIn("service log line", result.stderr)
+        self.assertIn("logs --no-color --tail 50 service", self.calls.read_text())
+
+    def test_a_port_that_accepts_but_never_answers_still_fails_in_time(self):
+        silent = socket.socket()
+        self.addCleanup(silent.close)
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(8)
+        started = time.monotonic()
+        result = self.compose_health(f"127.0.0.1:{silent.getsockname()[1]}")
+        self.assertNotEqual(result.returncode, 0)
+        # The 2 s deadline holds even when every attempt waits its full 2 s.
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_a_container_with_no_published_port_fails_with_its_log(self):
+        started = time.monotonic()
+        # The deadline counts whole seconds, so 3 s always leaves room for a second attempt.
+        result = self.compose_health("", seconds=3)
+        self.assertNotEqual(result.returncode, 0)
+        # A restarting container has no address yet, so the check keeps asking until the deadline.
+        self.assertGreaterEqual(time.monotonic() - started, 2)
+        self.assertGreaterEqual(self.calls.read_text().count("port service 8080"), 2)
+        self.assertIn("No published address for the service was found within 3 s", result.stderr)
+        self.assertIn("service log line", result.stderr)
 
 
 class GeneratedCiTest(unittest.TestCase):

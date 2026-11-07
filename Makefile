@@ -4,11 +4,12 @@ TAPLO_VERSION := 0.10.0
 CARGO_GENERATE_VERSION := 0.25.0
 ACTIONLINT_VERSION := 1.7.12
 FEATURES ?=
+COMPOSE_HEALTH_SECONDS ?= 30
 CARGO_FEATURES = $(if $(strip $(FEATURES)),--features "$(FEATURES)")
 IMAGE := rust-backend-template:local
 
 .DEFAULT_GOAL := help
-.PHONY: help run migrate build test test-crate test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version image compose-up compose-down compose-migrate compose-settings
+.PHONY: help run migrate build test test-crate test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version image compose-up compose-down compose-migrate compose-settings compose-health
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -44,6 +45,21 @@ compose-settings:
 
 compose-up: compose-settings image ## Run the service container against an existing PostgreSQL, reading .env or SERVICE_ENV_FILE
 	docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" up --detach --no-build --wait
+	@$(MAKE) --no-print-directory compose-health
+
+# A container that exits at startup restarts in a loop, which `--wait` counts as running,
+# so the start counts only once GET /health answers. Docker names the service's address;
+# a restarting container has none yet, which counts as not answering.
+compose-health:
+	@end=$$(( $$(date +%s) + $(COMPOSE_HEALTH_SECONDS) )); seen=; \
+	while [ "$$(date +%s)" -lt "$$end" ]; do \
+	  address="$$(docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" port service 8080 2>/dev/null)"; \
+	  [ -z "$$address" ] || seen="$$address"; \
+	  [ -n "$$address" ] && curl -fs --max-time 2 -o /dev/null "http://$$address/health" && exit 0; sleep 1; \
+	done; \
+	if [ -n "$$seen" ]; then echo "GET http://$$seen/health did not return 200 within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; \
+	else echo "No published address for the service was found within $(COMPOSE_HEALTH_SECONDS) s; the service log follows." >&2; fi; \
+	docker compose --env-file "$${SERVICE_ENV_FILE:-.env}" logs --no-color --tail 50 service >&2; exit 1
 
 compose-down: ## Stop and remove the service container
 	docker compose down

@@ -15,14 +15,23 @@ x-service: &service
 services:
   service:
     <<: *service
-    # One interpolated PORT sets both the listener and the published port.
+    # Inside, the service always listens on the port the image exposes; PORT picks the
+    # port on this machine, and `make compose-health` asks Docker for that address.
     environment:
-      PORT: ${PORT:-8080}
+      PORT: "8080"
     ports:
       # Only this machine can reach the service, which writes to a real database.
-      - 127.0.0.1:${PORT:-8080}:${PORT:-8080}
+      - 127.0.0.1:${PORT:-8080}:8080
     # Longer than the server's 30-second shutdown timeout, so the pool closes before SIGKILL.
     stop_grace_period: 40s
+    # A deployed service comes back after a crash or a reboot, until `make compose-down`.
+    restart: unless-stopped
+    # Docker never rotates its default log, so cap it before it fills the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   # Runs only when asked: starting the service never applies migrations.
   migrate:

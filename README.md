@@ -103,7 +103,7 @@ make compose-down      # stop and remove the service container
 ```
 
 Compose reads `.env`, or the file `SERVICE_ENV_FILE` names; `compose-up` and `compose-migrate` stop when that file is missing.
-An exported shell `PORT` overrides that file's `PORT`, both for the port the service listens on and for the published port.
+`PORT` picks the port on this machine; inside the container the service always listens on 8080. An exported shell `PORT` overrides the file's.
 Inside a container, `localhost` is the container itself, so reach PostgreSQL on this machine as `host.docker.internal`, for example `DATABASE_URL=postgres://<user>@host.docker.internal:5432/<database>`.
 `make run` needs `localhost`, so keep the container's settings in a second file, which Git and the image both ignore:
 
@@ -112,7 +112,110 @@ SERVICE_ENV_FILE=.env.container make compose-up
 ```
 
 The service accepts connections only from this machine. Read its logs with `docker compose logs`.
+`make compose-up` fails, printing the service's log, unless `GET /health` answers within 30 seconds.
+The container then starts again with Docker, after a reboot too, until `make compose-down` removes it.
 These targets need Docker with Compose 2.24.0 or later; Colima is the tested local runtime.
+
+## Deploy it
+
+This recipe runs one release on one VM with Docker Compose, behind nginx with Cloudflare in front.
+The VM builds the image from a release tag, so no image registry is needed; it compiles the service again for each deploy and rollback.
+
+### Prepare the VM
+
+- Docker Engine with Compose 2.24.0 or later, started at boot, a deploy user in the `docker` group, and `curl`.
+- nginx.
+- A PostgreSQL server on another host, or a managed one, that the VM can reach, with the application's database created. For TLS settings, see [Database transport and connection options](#database-transport-and-connection-options).
+  This recipe does not cover a PostgreSQL on the VM itself: a container reaches the VM only through Docker's networks, which needs PostgreSQL, `pg_hba.conf` and firewall changes the recipe has not tested.
+- A clone of this repository at `/srv/rust-backend-template`, owned by the deploy user.
+
+Keep the settings outside the checkout, readable only by the deploy user. Running this again keeps an existing file's contents:
+
+```sh
+mkdir -p ~/.config/rust-backend-template
+f=~/.config/rust-backend-template/service.env
+touch "$f"
+chmod 600 "$f"
+# Set PORT and DATABASE_URL in it, and API_DOC_PASSWORD for an api-doc build.
+```
+
+### Deploy a release
+
+```sh
+cd /srv/rust-backend-template
+git fetch --tags
+git checkout v1.2.3
+export SERVICE_ENV_FILE=~/.config/rust-backend-template/service.env
+make compose-migrate
+make compose-up
+```
+
+`make compose-migrate` builds the image from the checked-out tag, then applies its migrations.
+`make compose-up` replaces the running container, so requests fail for a few seconds. It then fails, printing the service's log, unless `GET /health` answers within 30 seconds.
+By then the old release is stopped: read the log, then fix the settings and run `make compose-up` again, or follow [Roll back](#roll-back).
+For an api-doc build, add `FEATURES=api-doc` to every `make` command in this section, the rollback included.
+The service restarts after a crash or a reboot until `make compose-down` stops it, and Docker keeps at most 3 log files of 10 MB for it.
+
+### Put nginx in front
+
+nginx forwards traffic to the service's `127.0.0.1` port, which stays closed to other machines.
+The block below assumes `PORT=8080`; put your `PORT` in `proxy_pass`.
+
+```nginx
+# /etc/nginx/conf.d/rust-backend-template.conf
+server {
+    # Proxied DNS: Cloudflare connects here over HTTPS with the origin certificate.
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    ssl_certificate     /etc/ssl/cloudflare/origin.pem;
+    ssl_certificate_key /etc/ssl/cloudflare/origin.key;
+    # Cloudflare Tunnel: replace the four lines above with `listen 127.0.0.1:80;`.
+
+    server_name api.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+```
+
+Set up Cloudflare in one of two ways:
+
+- **Proxied DNS.** Point a proxied DNS record at the VM, set SSL/TLS mode to Full (strict), and save a Cloudflare Origin Certificate and its key as the two files above, with the key at mode 600.
+- **Cloudflare Tunnel.** Use the `listen 127.0.0.1:80;` line, with no certificate and no open port. In the `cloudflared` configuration, forward the hostname to nginx:
+
+  ```yaml
+  ingress:
+    - hostname: api.example.com
+      service: http://127.0.0.1:80
+    - service: http_status:404
+  ```
+
+Then check the configuration and reload nginx:
+
+```sh
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+With proxied DNS, allow port 443 only from [Cloudflare's address ranges](https://www.cloudflare.com/ips/) in the VM's or your cloud provider's firewall, so nobody reaches the VM around Cloudflare. A Tunnel needs no open port.
+
+### Roll back
+
+Check out the earlier tag and start it, without migrating:
+
+```sh
+cd /srv/rust-backend-template
+git checkout v1.2.2
+export SERVICE_ENV_FILE=~/.config/rust-backend-template/service.env
+make compose-up
+```
+
+`make compose-up` checks `GET /health` as it does on a deploy.
+Migrations are never undone, and an older `migrate` command refuses a database that has newer migrations.
+Roll back only to a release whose code works with the newer schema, which is why a migration should add columns and tables before a later release removes old ones.
 
 ## Tasks example
 
