@@ -65,6 +65,13 @@ jobs:
         with:
           tool: taplo@${{ steps.tools.outputs.taplo }}
           fallback: none
+      - name: Install prebuilt cargo-deny
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}
+          fallback: none
+      - name: Audit dependencies
+        run: make audit
       - name: Lint
         run: make lint
       - name: Default fast tests

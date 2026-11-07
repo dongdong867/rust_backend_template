@@ -1,0 +1,32 @@
+name: Dependency audit
+
+# A new advisory can name a crate that is already locked, so the default branch is checked weekly.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read project tool pins
+        id: tools
+        run: make --no-print-directory tool-versions >> "$GITHUB_OUTPUT"
+      - name: Install pinned Rust from rust-toolchain.toml
+        run: rustup show active-toolchain
+      - name: Install prebuilt cargo-deny
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}
+          fallback: none
+      - name: Audit dependencies
+        run: make audit

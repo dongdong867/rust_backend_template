@@ -117,7 +117,7 @@ class TemplateChecksTest(unittest.TestCase):
             }):
                 for project in (self.source, self.output):
                     template_test.check_generated(project, fast_only=fast_only)
-                targets = ["lint", "test"] if fast_only else ["check"]
+                targets = ["lint", "audit", "test"] if fast_only else ["check"]
                 self.assertEqual(
                     [call.args[0] for call in run.call_args_list],
                     [["make", *targets, f"FEATURES={feature}"]

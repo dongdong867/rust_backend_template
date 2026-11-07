@@ -66,6 +66,39 @@ class CiPolicyTest(unittest.TestCase):
         for command in ("make build", "cargo check", "make test-db", "DATABASE_URL"):
             self.assertNotIn(command, text)
 
+    def test_source_validation_audits_dependencies(self):
+        validate = jobs(self.workflow("template-ci.yml"))["validate"]
+        install = validate.index("      - name: Install prebuilt cargo-deny\n")
+        self.assertIn("tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}\n"
+                      "          fallback: none\n", validate[install:])
+        audit = validate.index("        run: make audit\n")
+        self.assertLess(validate.index("id: tools"), install)
+        self.assertLess(install, audit)
+        self.assertLess(audit, validate.index("make template-test-fast"))
+
+    def test_audit_runs_weekly_and_by_hand_on_the_default_branch(self):
+        text = self.workflow("audit.yml")
+        triggers = text.split("\non:\n", 1)[1].split("\n\n", 1)[0]
+        # A schedule runs on the default branch's latest commit.
+        self.assertEqual(triggers, '  schedule:\n    - cron: "17 6 * * 1"\n  workflow_dispatch:')
+        self.assertEqual(text.split("\npermissions:\n", 1)[1].split("\n\n", 1)[0],
+                         "  contents: read")
+        self.assertNotRegex(text, r"(?m)^\s+[\w-]+: write$")
+        self.assertNotIn("secrets.", text)
+        self.assertNotIn("continue-on-error", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertRegex(text, r"timeout-minutes: \d+")
+        for action in re.findall(r"^\s+(?:- )?uses: ([^\s]+)", text, re.M):
+            self.assertRegex(action, r"^[\w./-]+@[a-f0-9]{40}$")
+        steps = re.split(r"\n(?=      - )", jobs(text)["audit"])
+        self.assertEqual(len(steps), 6)
+        self.assertIn("uses: actions/checkout@", steps[1])
+        self.assertIn("run: make --no-print-directory tool-versions >> \"$GITHUB_OUTPUT\"", steps[2])
+        self.assertIn("run: rustup show active-toolchain", steps[3])
+        self.assertIn("tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}\n"
+                      "          fallback: none", steps[4])
+        self.assertEqual(steps[5], "      - name: Audit dependencies\n        run: make audit\n")
+
     def test_permissions_pins_concurrency_and_timeouts(self):
         for name in ("format.yml", "template-ci.yml"):
             with self.subTest(name=name):
@@ -272,6 +305,17 @@ class CiPolicyTest(unittest.TestCase):
             self.assertIn("persist-credentials: false", section)
             self.assertRegex(section, r"timeout-minutes: \d+")
 
+    def test_release_audits_dependencies_before_lint(self):
+        verify = jobs(self.workflow("release.yml"))["verify"]
+        install = verify.index("      - name: Install prebuilt cargo-deny\n")
+        self.assertIn("tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}\n"
+                      "          fallback: none\n", verify[install:])
+        audit = verify.index("        run: make audit\n")
+        # A known advisory stops the release before the slower checks, and before publish runs.
+        self.assertLess(verify.index("release.py verify"), install)
+        self.assertLess(install, audit)
+        self.assertLess(audit, verify.index("make lint"))
+
     def test_release_runs_real_database_tests_on_its_own_postgres(self):
         sections = jobs(self.workflow("release.yml"))
         verify, publish = sections["verify"], sections["publish"]
@@ -341,10 +385,23 @@ class CiPolicyTest(unittest.TestCase):
         for name in ("AGENTS.md", "AGENTS.md.liquid"):
             self.assertIn("add its test binary to the `test-db` target", (ROOT / name).read_text(), name)
 
+    def test_guidance_describes_the_audit(self):
+        for name in ("AGENTS.md", "AGENTS.md.liquid"):
+            text = (ROOT / name).read_text()
+            self.assertIn("it includes lint, the dependency audit, fast tests and real database tests",
+                          text, name)
+            self.assertIn("`make audit`", text, name)
+        for name in ("README.md", "README.md.liquid"):
+            text = (ROOT / name).read_text()
+            self.assertIn("`.github/workflows/audit.yml`", text, name)
+            # GitHub stops running a public repository's schedules after 60 days without activity.
+            self.assertIn("after 60 days without activity", text, name)
+
     def test_only_source_workflow_is_excluded_from_generation(self):
         excluded = (ROOT / ".genignore").read_text().splitlines()
         self.assertIn("/.github/workflows/template-ci.yml", excluded)
         self.assertNotIn("/.github/workflows/format.yml", excluded)
+        self.assertNotIn("/.github/workflows/audit.yml", excluded)
         self.assertNotIn("/.github/dependabot.yml", excluded)
         config = (ROOT / "cargo-generate.toml").read_text()
         self.assertNotIn('".github/', config)
@@ -411,7 +468,8 @@ class CiPolicyTest(unittest.TestCase):
         )
         versions = dict(line.split("=", 1) for line in result.splitlines())
         self.assertEqual(versions, {
-            "taplo": "0.10.0", "cargo-generate": "0.25.0", "actionlint": "1.7.12",
+            "taplo": "0.10.0", "cargo-deny": "0.20.2", "cargo-generate": "0.25.0",
+            "actionlint": "1.7.12",
         })
 
     def test_fast_template_target_has_no_database_checks(self):
@@ -420,6 +478,98 @@ class CiPolicyTest(unittest.TestCase):
         )
         self.assertIn("python3 scripts/template_test.py --fast-only", text)
         self.assertNotIn("test-db", text)
+
+
+def tables(text):
+    """Split a plain TOML file, such as deny.toml, by its `[table]` headers."""
+    names = re.findall(r"^\[([\w.-]+)\]$", text, re.M)
+    parts = re.split(r"^\[[\w.-]+\]$", text, flags=re.M)[1:]
+    return dict(zip(names, parts))
+
+
+class AuditPolicyTest(unittest.TestCase):
+    """deny.toml is the audit policy; `make audit` runs cargo-deny with it."""
+
+    def setUp(self):
+        self.policy = tables((ROOT / "deny.toml").read_text())
+
+    def test_every_feature_is_audited(self):
+        self.assertIn("all-features = true\n", self.policy["graph"])
+
+    def test_vulnerable_unmaintained_and_yanked_crates_fail(self):
+        advisories = self.policy["advisories"]
+        self.assertIn('unmaintained = "all"\n', advisories)
+        self.assertIn('yanked = "deny"\n', advisories)
+        # cargo-deny 0.20 always fails on vulnerability, unsound and notice advisories.
+        for removed in ("vulnerability", "notice", "unsound", "severity-threshold"):
+            self.assertNotRegex(advisories, rf"(?m)^{removed} =")
+
+    def test_each_ignored_advisory_gives_its_reason(self):
+        ignore = re.search(r"(?ms)^ignore = \[(.*?)\]$", self.policy["advisories"])
+        self.assertIsNotNone(ignore)
+        entries = [line.strip() for line in ignore.group(1).splitlines()
+                   if line.strip() and not line.strip().startswith("#")]
+        for entry in entries:
+            self.assertRegex(entry, r'^\{ id = "RUSTSEC-\d{4}-\d{4}", reason = "[^"]+" \},$')
+
+    def test_only_the_approved_licenses_are_allowed(self):
+        allow = re.search(r"(?ms)^allow = \[\n(.*?)^\]$", self.policy["licenses"]).group(1)
+        self.assertEqual(re.findall(r'^  "([^"]+)",$', allow, re.M), [
+            "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "ISC",
+            "Zlib", "Unicode-3.0", "BSL-1.0", "Unlicense",
+        ])
+        self.assertNotIn("exceptions", self.policy["licenses"])
+        self.assertNotIn("[[licenses.clarify]]", (ROOT / "deny.toml").read_text())
+        # Workspace crates set publish = false, so their missing license field is never checked.
+        self.assertIn("ignore = true\n", self.policy["licenses.private"])
+
+    def test_workspace_crates_are_unpublished(self):
+        manifests = [ROOT / "rust-backend-template/Cargo.toml",
+                     *sorted((ROOT / "crates").glob("*/Cargo.toml"))]
+        for manifest in manifests:
+            self.assertIn("\npublish = false\n", manifest.read_text(), manifest)
+
+    def test_duplicate_versions_only_warn(self):
+        self.assertIn('multiple-versions = "warn"\n', self.policy["bans"])
+
+    def test_crates_come_only_from_crates_io(self):
+        sources = self.policy["sources"]
+        for line in ('unknown-registry = "deny"\n', 'unknown-git = "deny"\n',
+                     'allow-registry = ["https://github.com/rust-lang/crates.io-index"]\n',
+                     "allow-git = []\n"):
+            self.assertIn(line, sources)
+        self.assertNotIn("sources.allow-org", self.policy)
+
+    def test_full_check_audits_but_the_commit_hook_does_not(self):
+        makefile = (ROOT / "Makefile").read_text()
+        self.assertRegex(makefile, r"(?m)^check: lint audit test test-db ##")
+        self.assertNotIn("audit", (ROOT / ".githooks/pre-commit").read_text())
+
+    def audit(self, version):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = Path(directory) / "calls"
+            fake = Path(directory) / "cargo-deny"
+            fake.write_text(textwrap.dedent(f"""\
+                #!/bin/sh
+                if [ "$1" = --version ]; then echo "cargo-deny {version}"; exit 0; fi
+                echo "$@" >> "{calls}"
+                """))
+            fake.chmod(0o755)
+            result = subprocess.run(["make", "--no-print-directory", "audit"], cwd=ROOT,
+                                    capture_output=True, text=True,
+                                    env={"PATH": f"{directory}:{os.environ['PATH']}"})
+            return result, calls.read_text() if calls.exists() else ""
+
+    def test_audit_runs_every_check_without_changing_the_lock_file(self):
+        result, calls = self.audit("0.20.2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, "--locked check\n")
+
+    def test_audit_refuses_another_cargo_deny_version(self):
+        result, calls = self.audit("0.19.0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cargo-deny 0.20.2 is required. Run: make tools", result.stderr)
+        self.assertEqual(calls, "")
 
 
 class ContainerPolicyTest(unittest.TestCase):
@@ -629,6 +779,7 @@ class GeneratedCiTest(unittest.TestCase):
             ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
             ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
             ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
+            ".github/workflows/audit.yml",
         )
         for name in self.files:
             for root in (self.source, self.project):
