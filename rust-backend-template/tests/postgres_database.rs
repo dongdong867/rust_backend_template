@@ -9,9 +9,23 @@ use rust_backend_template::database::{create_migration_pool, create_pool};
 use sqlx::{ConnectOptions, Connection, PgConnection, PgPool, postgres::PgConnectOptions};
 use uuid::Uuid;
 
-#[actix_web::test]
-#[ignore = "requires TEST_DATABASE_URL and CREATEDB permission; run make test-db"]
-async fn postgres_pool_connects_and_migrations_are_repeatable() {
+/// Creates a database named `<prefix>_<random suffix>` on the test server, runs `body` on what
+/// `open` builds from its name and URL, then drops the database.
+///
+/// `body` runs in its own task, so cleanup still runs when it panics. Before the drop, `close`
+/// releases a retained copy of what `open` built, such as pools. A failure panics with `label`
+/// and its stage.
+async fn with_isolated_database<R, Body, Closed>(
+    prefix: &str,
+    label: &str,
+    open: impl FnOnce(&str, &url::Url) -> R,
+    body: impl FnOnce(R) -> Body,
+    close: impl FnOnce(R) -> Closed,
+) where
+    R: Clone,
+    Body: Future<Output = Result<(), &'static str>> + Send + 'static,
+    Closed: Future<Output = ()>,
+{
     let base_url = std::env::var("TEST_DATABASE_URL")
         .expect("TEST_DATABASE_URL must name an already-running dedicated test server");
     let options = PgConnectOptions::from_str(&base_url)
@@ -20,20 +34,15 @@ async fn postgres_pool_connects_and_migrations_are_repeatable() {
     let mut isolated_url =
         url::Url::parse(&base_url).unwrap_or_else(|_| panic!("invalid TEST_DATABASE_URL"));
     // Only generated ASCII identifiers enter the creation/drop statements.
-    let database_name = format!("scaffold_smoke_{}", Uuid::new_v4().simple());
+    assert!(
+        prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+        "the database name prefix must be lowercase ASCII letters and underscores"
+    );
+    let database_name = format!("{prefix}_{}", Uuid::new_v4().simple());
     isolated_url.set_path(&format!("/{database_name}"));
-    let config = Config::from_lookup(|name| {
-        (name == "DATABASE_URL")
-            .then(|| isolated_url.as_str().to_owned())
-            .or_else(|| {
-                (name == "API_DOC_PASSWORD").then(|| "documentation-test-password".to_owned())
-            })
-    })
-    .unwrap_or_else(|_| panic!("isolated DATABASE_URL failed environment validation"));
-    let pool = create_pool(&config.database)
-        .unwrap_or_else(|_| panic!("isolated database pool construction failed"));
-    let migration_pool = create_migration_pool(&config.database)
-        .unwrap_or_else(|_| panic!("isolated migration pool construction failed"));
+    let resources = open(&database_name, &isolated_url);
     let mut admin = PgConnection::connect_with(&options)
         .await
         .unwrap_or_else(|_| panic!("could not connect to TEST_DATABASE_URL server"));
@@ -44,22 +53,13 @@ async fn postgres_pool_connects_and_migrations_are_repeatable() {
     .await
     .is_ok();
     if !created {
-        pool.close().await;
-        migration_pool.close().await;
+        close(resources).await;
         let _ = admin.close().await;
         panic!("could not create isolated database; CREATEDB permission is required");
     }
 
-    // Retain the pools outside the body so even a body panic permits cleanup.
-    let smoke_pool = pool.clone();
-    let smoke_migration_pool = migration_pool.clone();
-    let smoke_name = database_name.clone();
-    let outcome = tokio::spawn(async move {
-        exercise_scaffold(&smoke_pool, &smoke_migration_pool, &smoke_name).await
-    })
-    .await;
-    pool.close().await;
-    migration_pool.close().await;
+    let outcome = tokio::spawn(body(resources.clone())).await;
+    close(resources).await;
     let dropped = sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP DATABASE \"{database_name}\""
     )))
@@ -69,13 +69,49 @@ async fn postgres_pool_connects_and_migrations_are_repeatable() {
     let closed = admin.close().await.is_ok();
 
     // Never render SQLx errors: they may contain SQL or connection details.
-    assert!(dropped, "could not remove isolated smoke database");
-    assert!(closed, "could not close smoke administrative connection");
+    assert!(dropped, "{label}: could not remove the isolated database");
+    assert!(
+        closed,
+        "{label}: could not close the administrative connection"
+    );
     match outcome {
         Ok(Ok(())) => {}
-        Ok(Err(stage)) => panic!("database scaffold smoke failed: {stage}"),
-        Err(_) => panic!("database scaffold smoke body panicked"),
+        Ok(Err(stage)) => panic!("{label} failed: {stage}"),
+        Err(_) => panic!("{label} panicked"),
     }
+}
+
+#[actix_web::test]
+#[ignore = "requires TEST_DATABASE_URL and CREATEDB permission; run make test-db"]
+async fn postgres_pool_connects_and_migrations_are_repeatable() {
+    with_isolated_database(
+        "scaffold_smoke",
+        "database scaffold smoke",
+        |database_name, url| {
+            let config = Config::from_lookup(|name| {
+                (name == "DATABASE_URL")
+                    .then(|| url.as_str().to_owned())
+                    .or_else(|| {
+                        (name == "API_DOC_PASSWORD")
+                            .then(|| "documentation-test-password".to_owned())
+                    })
+            })
+            .unwrap_or_else(|_| panic!("isolated DATABASE_URL failed environment validation"));
+            let pool = create_pool(&config.database)
+                .unwrap_or_else(|_| panic!("isolated database pool construction failed"));
+            let migration_pool = create_migration_pool(&config.database)
+                .unwrap_or_else(|_| panic!("isolated migration pool construction failed"));
+            (pool, migration_pool, database_name.to_owned())
+        },
+        |(pool, migration_pool, database_name)| async move {
+            exercise_scaffold(&pool, &migration_pool, &database_name).await
+        },
+        |(pool, migration_pool, _)| async move {
+            pool.close().await;
+            migration_pool.close().await;
+        },
+    )
+    .await;
 }
 
 async fn exercise_scaffold(
@@ -233,48 +269,14 @@ fn migrate_command(database_url: &str) -> Command {
 #[actix_web::test]
 #[ignore = "requires TEST_DATABASE_URL and CREATEDB permission; run make test-db"]
 async fn migrate_finishes_a_step_that_waits_longer_than_the_statement_timeout() {
-    let base_url = std::env::var("TEST_DATABASE_URL")
-        .expect("TEST_DATABASE_URL must name an already-running dedicated test server");
-    let options = PgConnectOptions::from_str(&base_url)
-        .unwrap_or_else(|_| panic!("invalid TEST_DATABASE_URL"))
-        .disable_statement_logging();
-    let mut database_url =
-        url::Url::parse(&base_url).unwrap_or_else(|_| panic!("invalid TEST_DATABASE_URL"));
-    // Only generated ASCII identifiers enter the creation/drop statements.
-    let database_name = format!("migrate_wait_{}", Uuid::new_v4().simple());
-    database_url.set_path(&format!("/{database_name}"));
-    let mut admin = PgConnection::connect_with(&options)
-        .await
-        .unwrap_or_else(|_| panic!("could not connect to TEST_DATABASE_URL server"));
-    let created = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "CREATE DATABASE \"{database_name}\""
-    )))
-    .execute(&mut admin)
-    .await
-    .is_ok();
-    if !created {
-        let _ = admin.close().await;
-        panic!("could not create isolated database; CREATEDB permission is required");
-    }
-
-    let outcome =
-        tokio::spawn(async move { migrate_behind_a_lock(database_url.as_str()).await }).await;
-    let dropped = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DROP DATABASE \"{database_name}\""
-    )))
-    .execute(&mut admin)
-    .await
-    .is_ok();
-    let closed = admin.close().await.is_ok();
-
-    // Never render SQLx errors: they may contain SQL or connection details.
-    assert!(dropped, "could not remove isolated migrate database");
-    assert!(closed, "could not close migrate administrative connection");
-    match outcome {
-        Ok(Ok(())) => {}
-        Ok(Err(stage)) => panic!("migrate behind a lock failed: {stage}"),
-        Err(_) => panic!("migrate behind a lock panicked"),
-    }
+    with_isolated_database(
+        "migrate_wait",
+        "migrate behind a lock",
+        |_, url| url.as_str().to_owned(),
+        |database_url| async move { migrate_behind_a_lock(&database_url).await },
+        |_| async {},
+    )
+    .await;
 }
 
 /// Runs `migrate` once, then again while another session holds a lock on `_sqlx_migrations`
