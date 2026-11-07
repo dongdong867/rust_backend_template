@@ -69,7 +69,7 @@ class TemplateChecksTest(unittest.TestCase):
             self.write(self.output, path, (template_test.ROOT / path).read_text())
         self.write(self.output, "Makefile", "test:\n\tcargo test --locked\ntest-crate:\n\tpython3 helper\n")
         self.write(self.output, ".example.env", "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n"
-                   "DATABASE_ACQUIRE_TIMEOUT_SECS=10\n")
+                   "DATABASE_ACQUIRE_TIMEOUT_SECS=10\nDATABASE_STATEMENT_TIMEOUT_SECS=10\n")
         self.write(self.output, template_test.WORKFLOW_PROBE, template_test.WORKFLOW_TEXT)
         (self.output / "CLAUDE.md").symlink_to("AGENTS.md")
         self.write(self.output, "Dockerfile",
@@ -346,6 +346,17 @@ class TemplateChecksTest(unittest.TestCase):
                            "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n" + line)
                 with self.assertRaisesRegex(
                         RuntimeError, r"must list DATABASE_ACQUIRE_TIMEOUT_SECS=10\."):
+                    self.check_project()
+
+    def test_database_statement_timeout_must_be_documented(self):
+        self.project()
+        for line in ("", "DATABASE_STATEMENT_TIMEOUT_SECS=30\n", "DATABASE_STATEMENT_TIMEOUT_SECS=100\n"):
+            with self.subTest(line=line):
+                self.write(self.output, ".example.env",
+                           "DATABASE_URL=placeholder\nDATABASE_MAX_CONNECTIONS=10\n"
+                           "DATABASE_ACQUIRE_TIMEOUT_SECS=10\n" + line)
+                with self.assertRaisesRegex(
+                        RuntimeError, r"must list DATABASE_STATEMENT_TIMEOUT_SECS=10\."):
                     self.check_project()
 
     def test_snapshot_does_not_read_local_settings_or_build_output(self):
