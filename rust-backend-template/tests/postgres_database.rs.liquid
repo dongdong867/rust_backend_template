@@ -1,9 +1,10 @@
 //! Real-server smoke coverage for the feature-independent database scaffold.
 
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
-use environment::Config;
-use {{crate_name}}::database::create_pool;
+use environment::{Config, DatabaseConfig};
+use {{crate_name}}::database::{create_migration_pool, create_pool};
 use sqlx::{ConnectOptions, Connection, PgConnection, PgPool, postgres::PgConnectOptions};
 use uuid::Uuid;
 
@@ -85,4 +86,112 @@ async fn exercise_scaffold(pool: &PgPool, database_name: &str) -> Result<(), &'s
         .await
         .map_err(|_| "repeated migration run")?;
     Ok(())
+}
+
+/// Settings for a one-connection pool on the test server with a 1-second statement timeout.
+///
+/// `url_options` are added to the test server's URL as query parameters.
+fn one_second_statement_timeout_config(url_options: &[(&str, &str)]) -> DatabaseConfig {
+    let base_url = std::env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL must name an already-running dedicated test server");
+    let mut url =
+        url::Url::parse(&base_url).unwrap_or_else(|_| panic!("invalid TEST_DATABASE_URL"));
+    url.query_pairs_mut().extend_pairs(url_options);
+    Config::from_lookup(|name| match name {
+        "DATABASE_URL" => Some(url.as_str().to_owned()),
+        "DATABASE_MAX_CONNECTIONS" => Some("1".to_owned()),
+        "DATABASE_STATEMENT_TIMEOUT_SECS" => Some("1".to_owned()),
+        "API_DOC_PASSWORD" => Some("documentation-test-password".to_owned()),
+        _ => None,
+    })
+    .unwrap_or_else(|_| panic!("test DATABASE_URL failed environment validation"))
+    .database
+}
+
+/// Runs a 2-second sleep and checks that PostgreSQL cancels it after about 1 second.
+async fn assert_slow_query_is_cancelled(pool: &PgPool) {
+    let started = Instant::now();
+    let result = sqlx::query("SELECT pg_sleep(2)").execute(pool).await;
+    let elapsed = started.elapsed();
+    // Never render SQLx errors: they may contain SQL or connection details.
+    let code = result.err().and_then(|error| {
+        error
+            .as_database_error()?
+            .code()
+            .map(|code| code.into_owned())
+    });
+    assert_eq!(
+        code.as_deref(),
+        Some("57014"),
+        "expected a statement timeout"
+    );
+    assert!(
+        (Duration::from_millis(900)..Duration::from_millis(1900)).contains(&elapsed),
+        "cancelled after {elapsed:?}"
+    );
+}
+
+#[actix_web::test]
+#[ignore = "requires TEST_DATABASE_URL; run make test-db"]
+async fn the_service_pool_cancels_a_slow_query_and_runs_the_next_one() {
+    let pool = create_pool(&one_second_statement_timeout_config(&[]))
+        .unwrap_or_else(|_| panic!("pool construction failed"));
+    assert_slow_query_is_cancelled(&pool).await;
+    // The pool has one connection, so the next query runs on the cancelled query's connection.
+    let next: i32 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|_| panic!("the next query failed"));
+    assert_eq!(next, 1);
+    pool.close().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires TEST_DATABASE_URL; run make test-db"]
+async fn a_fast_query_returns_its_result_under_the_statement_timeout() {
+    let pool = create_pool(&one_second_statement_timeout_config(&[]))
+        .unwrap_or_else(|_| panic!("pool construction failed"));
+    let result: String = sqlx::query_scalar("SELECT 'done' FROM pg_sleep(0.1)")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|_| panic!("the fast query failed"));
+    assert_eq!(result, "done");
+    pool.close().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires TEST_DATABASE_URL; run make test-db"]
+async fn the_statement_timeout_setting_wins_over_the_url_option() {
+    let config = one_second_statement_timeout_config(&[("options[statement_timeout]", "60000")]);
+    let pool = create_pool(&config).unwrap_or_else(|_| panic!("pool construction failed"));
+    assert_slow_query_is_cancelled(&pool).await;
+    pool.close().await;
+    // The URL option reaches PostgreSQL on a pool without the setting.
+    let migration_pool =
+        create_migration_pool(&config).unwrap_or_else(|_| panic!("pool construction failed"));
+    assert_eq!(statement_timeout(&migration_pool).await, "1min");
+    migration_pool.close().await;
+}
+
+#[actix_web::test]
+#[ignore = "requires TEST_DATABASE_URL; run make test-db"]
+async fn the_migration_pool_runs_a_statement_longer_than_the_statement_timeout() {
+    let pool = create_migration_pool(&one_second_statement_timeout_config(&[]))
+        .unwrap_or_else(|_| panic!("pool construction failed"));
+    assert_eq!(statement_timeout(&pool).await, "0");
+    let started = Instant::now();
+    sqlx::query("SELECT pg_sleep(2)")
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|_| panic!("the 2-second statement failed on the migration pool"));
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    pool.close().await;
+}
+
+/// The `statement_timeout` a connection from `pool` reports.
+async fn statement_timeout(pool: &PgPool) -> String {
+    sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|_| panic!("SHOW statement_timeout failed"))
 }

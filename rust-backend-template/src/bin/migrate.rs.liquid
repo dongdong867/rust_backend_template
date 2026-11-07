@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use environment::Config;
-use {{crate_name}}::database::create_pool;
+use {{crate_name}}::database::create_migration_pool;
 
 #[actix_web::main]
 async fn main() -> ExitCode {
@@ -14,7 +14,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let pool = match create_pool(&config.database) {
+    let pool = match create_migration_pool(&config.database) {
         Ok(pool) => pool,
         Err(error) => {
             eprintln!("{error}");
