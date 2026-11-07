@@ -500,8 +500,10 @@ class AuditPolicyTest(unittest.TestCase):
         advisories = self.policy["advisories"]
         self.assertIn('unmaintained = "all"\n', advisories)
         self.assertIn('yanked = "deny"\n', advisories)
-        # cargo-deny 0.20 always fails on vulnerability, unsound and notice advisories.
-        for removed in ("vulnerability", "notice", "unsound", "severity-threshold"):
+        # The default scope reports unsound advisories only for direct dependencies.
+        self.assertIn('unsound = "all"\n', advisories)
+        # cargo-deny 0.20 removed these keys and always fails on vulnerability and notice advisories.
+        for removed in ("vulnerability", "notice", "severity-threshold"):
             self.assertNotRegex(advisories, rf"(?m)^{removed} =")
 
     def test_each_ignored_advisory_gives_its_reason(self):

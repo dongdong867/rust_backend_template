@@ -5,7 +5,9 @@
 all-features = true
 
 [advisories]
-# Vulnerability, unsound and notice advisories always fail.
+# Vulnerability and notice advisories always fail.
+# Unsound and unmaintained advisories fail for every crate, not only direct dependencies.
+unsound = "all"
 unmaintained = "all"
 yanked = "deny"
 # Ignore an advisory only with its reason: { id = "RUSTSEC-YYYY-NNNN", reason = "..." },
