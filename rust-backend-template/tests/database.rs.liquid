@@ -76,6 +76,15 @@ async fn the_pool_uses_the_configured_acquire_timeout_and_10_seconds_by_default(
     }
 }
 
+/// The startup options `pool` sends. SQLx starts them from `PGOPTIONS`, so a pool's own options
+/// come last.
+fn startup_options_of(pool: &PgPool) -> String {
+    pool.connect_options()
+        .get_options()
+        .unwrap_or_default()
+        .to_owned()
+}
+
 #[actix_web::test]
 async fn the_service_pool_sets_the_statement_timeout_and_the_migration_pool_does_not() {
     for (value, startup_options) in [
@@ -84,13 +93,12 @@ async fn the_service_pool_sets_the_statement_timeout_and_the_migration_pool_does
     ] {
         let (config, _port) = closed_port_config_with("DATABASE_STATEMENT_TIMEOUT_SECS", value);
         let database = create_pool(&config.database).unwrap();
-        assert_eq!(
-            database.connect_options().get_options(),
-            Some(startup_options)
-        );
+        let options = startup_options_of(&database);
+        assert!(options.ends_with(startup_options), "{options:?}");
         database.close().await;
         let migration = create_migration_pool(&config.database).unwrap();
-        assert_eq!(migration.connect_options().get_options(), None);
+        let options = startup_options_of(&migration);
+        assert!(!options.contains("statement_timeout"), "{options:?}");
         migration.close().await;
     }
 }
