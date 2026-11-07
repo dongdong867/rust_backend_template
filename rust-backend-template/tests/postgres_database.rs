@@ -263,6 +263,21 @@ fn migrate_command(database_url: &str) -> Command {
         .env("API_DOC_PASSWORD", "documentation-test-password")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Keep what SQLx reads to fill in the URL and find `~/.pgpass`. `PGOPTIONS` stays out,
+    // since it could set a statement timeout of its own.
+    for name in [
+        "PGUSER",
+        "PGPASSWORD",
+        "PGPORT",
+        "PGSSLMODE",
+        "PGSSLROOTCERT",
+        "PGPASSFILE",
+        "HOME",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     command
 }
 
