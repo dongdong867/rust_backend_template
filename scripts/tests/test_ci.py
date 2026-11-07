@@ -39,6 +39,16 @@ def jobs(text):
     return blocks(text, "jobs")
 
 
+# A condition or continue-on-error on this step would let a failed audit pass the job.
+AUDIT_STEP = "      - name: Audit dependencies\n        run: make audit"
+
+
+def audit_steps(job):
+    """Return each step of a job that runs `make audit`."""
+    steps = re.split(r"\n(?=      - )", job)
+    return [step.rstrip("\n") for step in steps if "make audit" in step]
+
+
 class CiPolicyTest(unittest.TestCase):
     def workflow(self, name):
         return (ROOT / ".github/workflows" / name).read_text()
@@ -75,6 +85,7 @@ class CiPolicyTest(unittest.TestCase):
         self.assertLess(validate.index("id: tools"), install)
         self.assertLess(install, audit)
         self.assertLess(audit, validate.index("make template-test-fast"))
+        self.assertEqual(audit_steps(validate), [AUDIT_STEP])
 
     def test_audit_runs_weekly_and_by_hand_on_the_default_branch(self):
         text = self.workflow("audit.yml")
@@ -315,6 +326,7 @@ class CiPolicyTest(unittest.TestCase):
         self.assertLess(verify.index("release.py verify"), install)
         self.assertLess(install, audit)
         self.assertLess(audit, verify.index("make lint"))
+        self.assertEqual(audit_steps(verify), [AUDIT_STEP])
 
     def test_release_runs_real_database_tests_on_its_own_postgres(self):
         sections = jobs(self.workflow("release.yml"))
