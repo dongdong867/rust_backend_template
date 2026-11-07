@@ -114,6 +114,11 @@ fn one_second_statement_timeout_config(url_options: &[(&str, &str)]) -> Database
 
 /// Runs a 2-second sleep and checks that PostgreSQL cancels it after about 1 second.
 async fn assert_slow_query_is_cancelled(pool: &PgPool) {
+    // Open the connection first, so the timed window holds only the slow query.
+    sqlx::query("SELECT 1")
+        .execute(pool)
+        .await
+        .unwrap_or_else(|_| panic!("the first query failed"));
     let started = Instant::now();
     let result = sqlx::query("SELECT pg_sleep(2)").execute(pool).await;
     let elapsed = started.elapsed();
@@ -141,7 +146,7 @@ async fn the_service_pool_cancels_a_slow_query_and_runs_the_next_one() {
     let pool = create_pool(&one_second_statement_timeout_config(&[]))
         .unwrap_or_else(|_| panic!("pool construction failed"));
     assert_slow_query_is_cancelled(&pool).await;
-    // The pool has one connection, so the next query runs on the cancelled query's connection.
+    // The same pool runs the next query after the cancellation.
     let next: i32 = sqlx::query_scalar("SELECT 1")
         .fetch_one(&pool)
         .await
