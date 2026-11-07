@@ -112,6 +112,7 @@ class TemplateChecksTest(unittest.TestCase):
                 "API_DOC_PASSWORD": "synthetic-inherited-secret",
                 "DATABASE_URL": "synthetic-application-database",
                 "DATABASE_ACQUIRE_TIMEOUT_SECS": "7",
+                "DATABASE_STATEMENT_TIMEOUT_SECS": "8",
                 "PORT": "4321",
             }):
                 for project in (self.source, self.output):
@@ -125,7 +126,8 @@ class TemplateChecksTest(unittest.TestCase):
                 for call in run.call_args_list:
                     self.assertTrue(call.kwargs["check"])
                     for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL",
-                                    "DATABASE_ACQUIRE_TIMEOUT_SECS", "PORT"):
+                                    "DATABASE_ACQUIRE_TIMEOUT_SECS",
+                                    "DATABASE_STATEMENT_TIMEOUT_SECS", "PORT"):
                         self.assertFalse(setting in call.kwargs["env"], setting)
                     self.assertEqual(call.kwargs["env"]["CARGO_TARGET_DIR"],
                                      str(template_test.ROOT / "target/template-test"))

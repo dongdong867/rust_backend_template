@@ -245,6 +245,7 @@ def cargo_environment():
     # Keep TEST_DATABASE_URL: it deliberately selects the dedicated test server.
     for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL",
                     "DATABASE_MAX_CONNECTIONS", "DATABASE_ACQUIRE_TIMEOUT_SECS",
+                    "DATABASE_STATEMENT_TIMEOUT_SECS",
                     "PORT", "RUST_LOG", "LOG_FORMAT",
                     "HTTP_CORS_ENABLED", "HTTP_CORS_ALLOWED_ORIGINS",
                     "HTTP_REQUEST_TIMEOUT_SECS", "HTTP_REQUEST_BODY_LIMIT_BYTES"):
