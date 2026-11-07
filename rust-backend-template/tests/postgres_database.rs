@@ -253,7 +253,7 @@ async fn statement_timeout(pool: &PgPool) -> String {
         .unwrap_or_else(|_| panic!("SHOW statement_timeout failed"))
 }
 
-/// Runs the built `migrate` on `database_url` with a 1-second statement timeout.
+/// Builds the command for the built `migrate` on `database_url` with a 1-second statement timeout.
 fn migrate_command(database_url: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_migrate"));
     command
