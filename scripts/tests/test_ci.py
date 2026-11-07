@@ -282,6 +282,17 @@ class CiPolicyTest(unittest.TestCase):
             self.assertIn("persist-credentials: false", section)
             self.assertRegex(section, r"timeout-minutes: \d+")
 
+    def test_release_audits_dependencies_before_lint(self):
+        verify = jobs(self.workflow("release.yml"))["verify"]
+        install = verify.index("      - name: Install prebuilt cargo-deny\n")
+        self.assertIn("tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}\n"
+                      "          fallback: none\n", verify[install:])
+        audit = verify.index("        run: make audit\n")
+        # A known advisory stops the release before the slower checks, and before publish runs.
+        self.assertLess(verify.index("release.py verify"), install)
+        self.assertLess(install, audit)
+        self.assertLess(audit, verify.index("make lint"))
+
     def test_release_runs_real_database_tests_on_its_own_postgres(self):
         sections = jobs(self.workflow("release.yml"))
         verify, publish = sections["verify"], sections["publish"]
