@@ -261,7 +261,8 @@ def check_generated(project, *, fast_only=False, structure_only=False):
     if structure_only:
         return
     environment = cargo_environment()
-    targets = ["lint", "test"] if fast_only else ["check"]
+    # Full mode runs make check without its audit, which audit_generated runs once per variant.
+    targets = ["lint", "test"] if fast_only else ["lint", "test", "test-db"]
     for feature in ("", "api-doc"):
         command = ["make", *targets, f"FEATURES={feature}"]
         print("+", " ".join(command), flush=True)
@@ -271,7 +272,7 @@ def check_generated(project, *, fast_only=False, structure_only=False):
 def audit_generated(projects):
     """Audit every project once, so one variant's advisory does not hide another's result.
 
-    The audit ignores FEATURES. Fast mode runs it after every other variant check.
+    The audit ignores FEATURES, so it runs once per variant, after every other variant check.
     """
     environment = cargo_environment()
     failed = []
@@ -325,6 +326,20 @@ def check_migration_rebuild(project, include_tasks, *, structure_only=False):
                        "Each package that embeds migrations needs a build.rs watching them.")
 
 
+def check_variants(executable, source, destination, *, fast_only, structure_only):
+    """Generate and check both variants, then audit them so an advisory hides no other result."""
+    projects = []
+    for include_tasks in (True, False):
+        name = "generated-with-example" if include_tasks else "generated-without-example"
+        project = generate(executable, source, destination, name, include_tasks)
+        check_project(project, name, include_tasks)
+        check_generated(project, fast_only=fast_only, structure_only=structure_only)
+        check_migration_rebuild(project, include_tasks, structure_only=structure_only)
+        projects.append(project)
+    if not structure_only:
+        audit_generated(projects)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     checks = parser.add_mutually_exclusive_group()
@@ -347,25 +362,16 @@ def main():
         canonical = generate(executable, source, temporary / "canonical", CANONICAL_NAME, True,
                              template_source=True)
         check_twins(source, canonical)
-        projects = []
-        for include_tasks in (True, False):
-            name = "generated-with-example" if include_tasks else "generated-without-example"
-            project = generate(executable, source, temporary / "variants", name, include_tasks)
-            check_project(project, name, include_tasks)
-            check_generated(project, fast_only=args.fast_only,
-                            structure_only=args.structure_only)
-            check_migration_rebuild(project, include_tasks, structure_only=args.structure_only)
-            projects.append(project)
-        if args.fast_only:
-            # Full mode audits through make check.
-            audit_generated(projects)
+        check_variants(executable, source, temporary / "variants", fast_only=args.fast_only,
+                       structure_only=args.structure_only)
     if args.structure_only:
         print("Generation structure and locked metadata passed; full make check was NOT run.")
     elif args.fast_only:
         print("Both generated variants passed default and api-doc lint, audit and fast tests; "
               "PostgreSQL checks were NOT run.")
     else:
-        print("Template twins and both generated variants passed default and api-doc full make check.")
+        print("Template twins and both generated variants passed default and api-doc lint, fast and "
+              "database tests, and the audit: every part of make check.")
 
 
 if __name__ == "__main__":

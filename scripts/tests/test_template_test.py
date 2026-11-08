@@ -117,8 +117,8 @@ class TemplateChecksTest(unittest.TestCase):
             }):
                 for project in (self.source, self.output):
                     template_test.check_generated(project, fast_only=fast_only)
-                targets = ["lint", "test"] if fast_only else ["check"]
-                # Fast mode audits each variant later, through audit_generated.
+                # The parts of make check except the audit, which audit_generated runs later.
+                targets = ["lint", "test"] if fast_only else ["lint", "test", "test-db"]
                 variant = [["make", *targets, f"FEATURES={feature}"]
                            for feature in ("", "api-doc")]
                 self.assertEqual([call.args[0] for call in run.call_args_list], variant * 2)
@@ -133,6 +133,38 @@ class TemplateChecksTest(unittest.TestCase):
                 calls = len(variant)
                 self.assertEqual([call.kwargs["cwd"] for call in run.call_args_list],
                                  [self.source] * calls + [self.output] * calls)
+
+    def test_variants_are_audited_after_every_other_variant_check(self):
+        for fast_only, structure_only in ((True, False), (False, False), (False, True)):
+            calls = []
+
+            def record(name, result=None):
+                def call(*args, **kwargs):
+                    calls.append((name, args[0] if args else None))
+                    return result(*args) if result else None
+                return call
+
+            def generated(executable, source, destination, name, include_tasks):
+                return destination / name
+
+            with self.subTest(fast_only=fast_only, structure_only=structure_only), \
+                    patch.object(template_test, "generate", side_effect=generated), \
+                    patch.object(template_test, "check_project"), \
+                    patch.object(template_test, "check_generated",
+                                 side_effect=record("check")), \
+                    patch.object(template_test, "check_migration_rebuild",
+                                 side_effect=record("rebuild")), \
+                    patch.object(template_test, "audit_generated",
+                                 side_effect=record("audit")):
+                template_test.check_variants("cargo-generate", self.source, self.output,
+                                             fast_only=fast_only, structure_only=structure_only)
+            with_example = self.output / "generated-with-example"
+            without_example = self.output / "generated-without-example"
+            expected = [("check", with_example), ("rebuild", with_example),
+                        ("check", without_example), ("rebuild", without_example)]
+            if not structure_only:
+                expected.append(("audit", [with_example, without_example]))
+            self.assertEqual(calls, expected)
 
     def test_audit_generated_reports_every_failed_variant(self):
         def result(command, cwd, env, check):
