@@ -113,7 +113,7 @@ class CiPolicyTest(unittest.TestCase):
         self.assertIn("run: rustup show active-toolchain", steps[3])
         self.assertIn("tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}\n"
                       "          fallback: none", steps[4])
-        self.assertEqual(steps[5], "      - name: Audit dependencies\n        run: make audit\n")
+        self.assertEqual(audit_steps(jobs(text)["audit"]), [AUDIT_STEP])
 
     def test_permissions_pins_concurrency_and_timeouts(self):
         for name in ("format.yml", "template-ci.yml"):
