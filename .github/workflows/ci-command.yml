@@ -1,3 +1,13 @@
+# Maintainer commands (/lint, /test, /test-{crate}); usage is in the README.
+# Keep these rules when changing this workflow or ci-command-worker.yml:
+# - The controller runs only trusted default-branch code and never checks out or runs the pull request.
+# - Only commenters with write, maintain or admin permission are accepted, and edited comments are refused.
+# - Jobs that run pull request code have read-only permissions and no secrets, and test only the captured head SHA.
+#   That code can still write default-branch cache entries.
+# - Only the controller and the worker's report job write commit statuses, and neither checks out pull request code.
+# - `ci-command /test` is not a required check: GitHub matches required checks by name, and a fork PR
+#   workflow also reports as GitHub Actions, so it could create a passing check with the same name.
+# - actionlint 1.7.12 does not know `queue: max`; the ci-config-check target exempts only those two lock mappings.
 name: CI command controller
 
 on:
