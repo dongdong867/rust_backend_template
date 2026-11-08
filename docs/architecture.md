@@ -1,120 +1,61 @@
 # Architecture
 
-Read this when adding a feature or changing an integration, configuration source, or resource lifecycle.
-[AGENTS.md](../AGENTS.md) defines the coding rules; [README.md](../README.md) covers setup and operation.
+Where new code goes. [AGENTS.md](../AGENTS.md) has the rules and checks.
 
 ## Ownership
 
 | Area | Owns |
 |---|---|
-| Service package | Startup and shutdown, logging, dependency composition, Actix routes and middleware, and HTTP error mapping |
-| `crates/environment` | Validated configuration, read once before startup |
-| `crates/<feature>` | A business feature's domain, use cases, adapter interfaces, and framework integrations |
-| `migrations/` | Versioned PostgreSQL schema changes, applied explicitly |
+| Service package | Startup and shutdown, logging, composing dependencies, routes, middleware, and mapping errors to HTTP responses |
+| `crates/environment` | Configuration, read and checked once before startup |
+| `crates/<feature>` | One business feature: its domain, use cases, ports and integrations |
+| `migrations/` | PostgreSQL schema changes, applied only by `migrate` |
 
-Keep business rules out of the service package. It selects integrations and connects them to the feature's interfaces.
-Keeping configuration at this boundary lets the same business code run with production dependencies or test doubles.
+Business rules stay out of the service package; it only picks integrations and connects them to features.
 
 ## Dependency placement
 
-Within a feature, dependencies point inward: application uses domain, adapter uses application and domain, and framework implements adapter interfaces.
-Inner layers do not import framework implementations, including in unit tests.
+Inside a feature, dependencies point inward: `application` uses `domain`, `adapter` uses both, and `framework` implements adapter interfaces.
 
-| New code | Place it in |
+| New code | Goes in |
 |---|---|
 | Entity or value type | `domain/` |
 | Use case and its input command | `application/use_case/` and `application/command/` |
-| Dependency required by a use case | `application/port/out/` |
-| Controller input port and implementation | `adapter/port/in/` and `adapter/controller/` |
-| HTTP request/response DTO | `adapter/dto/` |
-| Shared repository and plain storage DTO | `adapter/repository/` and `adapter/dto/storage/` |
+| Dependency a use case needs | `application/port/out/` |
+| Controller trait and implementation | `adapter/port/in/` and `adapter/controller/` |
+| HTTP request or response type | `adapter/dto/` |
+| Repository and plain storage types | `adapter/repository/` and `adapter/dto/storage/` |
 | Storage-provider interface | `adapter/port/out/` |
-| PostgreSQL or in-memory storage implementation | `framework/storage/` |
+| PostgreSQL or in-memory storage | `framework/storage/` |
 
-Use cases are concrete because tests exercise the actual business operation and replace its outbound dependencies.
-The controller is the input port; adding a second trait for each use case would add indirection without a needed substitution.
-
-The shared adapter repository owns domain/storage conversion, validation of reconstructed domain objects, and error translation.
-Storage providers own persistence mechanics. Plain storage DTOs keep SQLx and other storage-specific types outside the adapter.
-Provider selection belongs in the service package so choosing a backend does not change business operations or duplicate repository rules.
-
-Keep cross-layer error conversions in the outer involved layer to preserve dependency direction.
-Implement context-free conversions with `From` on the destination type; domain/application errors do not need presentation behavior unless a caller requires it.
-
-Add framework categories only for real integrations, according to responsibility: Redis persistence belongs in `storage/`, while Redis read acceleration belongs in `cache/`.
-Do not pre-create empty integration scaffolding.
+The repository converts between domain and storage types and translates errors; storage providers only persist.
+Put an error conversion in the outer of the two layers involved.
+Add a framework folder only for a real integration, such as `cache/` for a Redis cache.
 
 ## Configuration
 
-Read and validate settings once before starting the server. A bad setting should fail startup, not cause a request-dependent failure.
-Feature code receives dependencies rather than consulting environment variables.
-Named variables configure runtime behavior; Cargo features control compiled code. A general environment mode would hide which settings actually differ.
-
-Use the process environment for deployment settings and secrets; `.env` is a local convenience loaded by Make.
-Another configuration file format would add discovery and precedence rules without replacing deployment overrides.
-See [README configuration guidance](../README.md#configure-it) and [.example.env](../.example.env) for operator-facing settings.
-
-Secret-setting errors must name the setting without echoing its value.
-Database URL validation must reject unsupported parameters before driver diagnostics can expose their keys or values.
-When upgrading the PostgreSQL driver, keep its recognized parameter list aligned with this validation.
+Settings are read and checked once before the server starts, so a bad value fails at startup, not on a request.
+Feature code receives its dependencies and never reads the environment.
+Named settings configure runtime behavior and Cargo features choose compiled code; there is no general environment mode.
+A setting that holds a secret is never printed, including in its error.
+`DATABASE_URL` checking refuses parameters the driver does not know; keep that list in step when upgrading SQLx.
 
 ## Composition and lifecycle
 
-Compose dependencies once in the service package. Production and HTTP tests share the assembly path; tests inject different providers rather than maintaining a second graph.
-Use a typed provider bundle with one selected implementation per required port, not a registry of every available backend.
-Handlers receive their controller, not unrestricted access to the whole container.
+Production and the HTTP tests build the app the same way; tests only swap the providers.
+Providers come in one typed bundle with one implementation per port.
+Handlers receive their controller, not the whole container.
+The service owns one lazy PostgreSQL pool and closes it after the server stops, so startup and `/health` never need the database.
+Migrations run only through `migrate`, never at startup.
+Queries are checked at runtime, so building needs no database.
 
-The service owns one shared, lazy PostgreSQL pool and closes it after the HTTP server stops.
-Injected external resources remain caller-owned. Make ownership explicit when adding integrations so shutdown does not leak resources or close resources belonging to another caller.
+## Errors, logs and tests
 
-Lazy connections let startup and `/health` remain independent of database availability.
-Keep `/health` as liveness; add a separate readiness endpoint if a deployment needs dependency checks.
-Apply migrations explicitly, not during server startup or once per Actix worker.
-Use runtime-checked queries so building the service does not require a database or saved query metadata.
+Every route returns RFC 9457 problem details without internal error text.
+Logs never contain SQL, credentials, connection strings or query strings; request logs use only the path.
+Buffered request bodies share `HTTP_REQUEST_BODY_LIMIT_BYTES`; a route that streams its body sets its own limit.
+An HTML route sets its own Content-Security-Policy instead of weakening the API's.
+The `api-doc` feature gates the documentation crates and the schema derives on DTOs.
 
-## Safety and test boundaries
-
-Keep HTTP error mapping in the service package, including framework failures, so all routes return safe RFC 9457 problem details.
-Do not expose internal error text; logs must also avoid SQL, credentials, connection strings, and query strings.
-A URL query can contain secrets, so request logging uses only the path.
-
-Buffered extractors share the configured body limit. A route streaming raw payloads must enforce its own explicit limit.
-An HTML route must supply an appropriate route-specific CSP rather than weakening the API-wide policy.
-The HTTPS ingress or reverse proxy owns HSTS because it knows whether the connection is secure.
-
-The optional `api-doc` Cargo feature keeps documentation dependencies out of default builds.
-Schema derives on adapter DTOs are feature-gated; they do not move HTTP composition into feature crates.
-The service owns schema composition and one Basic-authenticated `/docs/` scope for UI, JSON and assets.
-Its vendored UI has a scoped CSP; API routes keep their strict policy and existing CORS rules.
-Documentation authentication is not API authentication, and credentials remain redacted configuration.
-
-Unit tests replace ports without pulling framework implementations into inner layers.
-Public-interface integration tests may compose real providers; in-memory HTTP tests exercise the actual application assembly.
-Real-database tests cover SQL, row mapping, migrations, and concurrency that port doubles cannot prove.
-
-Use process tests for logging checks: tracing caches callsite enablement globally, so test-scoped subscribers can miss events when tests run in parallel.
-For required commands and when to run them, see [AGENTS.md](../AGENTS.md#commands).
-
-## Maintainer-requested CI
-
-The command controller accepts requests using only trusted default-branch code.
-PR evaluation belongs exclusively to read-only hosted workers with no production secrets.
-Workers run on the default branch, so PR code can write default-branch cache entries.
-Acceptance, cancellation, bookkeeping and result-status writes share one non-cancelling repository/command lock.
-Workers never automatically cancel each other; the controller cancels only bound obsolete run IDs for the same PR and command.
-Durable request cursors on the single repository root commit preserve ordering across head updates.
-Legacy v2/v3 cursors remain readable; they record ownership, not test results or merge eligibility.
-Routing and acceptance reject edited comments using explicit GitHub edit metadata, including same-second edits.
-A separate trusted report job publishes the bound request's result as a `ci-command /<command>` status on the captured head; no bot report is published.
-Command statuses are not a configured required-check gate.
-See [command security and hosted validation](ci-commands.md) before changing these boundaries.
-
-## Release
-
-A hand-started `release.yml` run on `main` verifies the current `main` head, then creates its `vX.Y.Z` tag and GitHub Release.
-The service package is the only workspace package with a binary target; only its version must match the tag.
-Verification has a read-only token. A release is always the commit the run started on, so one checkout holds both `.github/ci/release.py` and the release commit. `GITHUB_TOKEN` cannot release a commit that differs from `main` in workflow files, so a run stops if `main` has moved.
-Only the publish job has `contents: write`, and it skips dry runs.
-The verify job runs `make audit` right after the version check, so a known advisory, a disallowed license or an unknown source stops a release before a tag exists.
-The verify job starts a temporary PostgreSQL and runs the tests listed in `make test-db`, so broken SQL those tests cover stops a release even if nobody ran `make check` by hand. Fast tests, pull request workflows and the pre-commit hook stay database-free.
-It then runs `make image`, so a Dockerfile that no longer builds stops a release. No workflow starts a container, and nothing else builds the image.
+Unit tests replace ports; in-memory HTTP tests use the real app; database tests cover SQL, mapping and migrations.
+Check log output in process tests, because tracing caches log settings across tests that run in parallel.

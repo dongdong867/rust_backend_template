@@ -455,28 +455,26 @@ class CiPolicyTest(unittest.TestCase):
                 self.assertIn("can leave it waiting for approval", text)
 
     def test_guidance_describes_head_statuses_without_bot_comments(self):
-        for name in ("README.md", "README.md.liquid", "docs/ci-commands.md"):
+        for name in ("README.md", "README.md.liquid"):
             with self.subTest(name=name):
                 text = (ROOT / name).read_text()
                 self.assertIn("`ci-command /test`", text)
                 self.assertNotIn("bot result comment is published", text.replace("\n", " "))
                 self.assertNotIn("Actions-only", text)
                 self.assertNotIn("Completed runs receive one updated bot result comment", text)
-                self.assertIn("Historical `ci-comment` statuses", text)
 
     def test_guidance_names_the_command_cache_write_risk(self):
         # The worker runs on the default branch, so PR code can write its cache scope.
-        for name in ("README.md", "README.md.liquid", "docs/ci-commands.md", "docs/architecture.md"):
+        for name in ("README.md", "README.md.liquid"):
             with self.subTest(name=name):
                 text = (ROOT / name).read_text().replace("\n", " ")
                 self.assertNotIn("shared writable cache", text)
                 self.assertNotIn("writable token", text)
                 self.assertNotIn("later CI runs restore", text)
                 self.assertIn("default-branch cache entries", text)
-                if name != "docs/architecture.md":
-                    self.assertIn("read the pr code before posting a command", text.lower())
+                self.assertIn("read the pr code before posting a command", text.lower())
         self.assertNotIn("shared caches", (ROOT / ".github/workflows/ci-command-worker.yml").read_text())
-        text = (ROOT / "docs/ci-commands.md").read_text().replace("\n", " ")
+        text = (ROOT / ".github/workflows/ci-command.yml").read_text().replace("\n#  ", " ")
         self.assertIn("`ci-command /test` is not a required check", text)
         self.assertIn("GitHub matches required checks by name", text)
         self.assertIn("also reports as GitHub Actions", text)

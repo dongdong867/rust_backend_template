@@ -1,140 +1,94 @@
 # {{project-name}}
 
-A starting point for an HTTP service in Rust with Actix Web.
+A starting point for an HTTP service in Rust with Actix Web and PostgreSQL.
 
 {% if template_source %}## Generate a service
-
-Use `cargo generate`, not GitHub's "Use this template" button:
 
 ```sh
 cargo install cargo-generate --version 0.25.0 --locked
 cargo generate --git https://github.com/dongdong867/rust_backend_template.git --name my-service
 ```
 
-Use **cargo-generate 0.25.0**; the template relies on that version's rendering and hooks.
-Choose whether to include the removable tasks example. Both choices retain PostgreSQL and migration support.
-Review the hooks before approving their execution, especially for an untrusted template.
-Generation runs Cargo and requires Unix `ln` for the agent-instructions symlink; dependency resolution may need network access.
+Use cargo-generate 0.25.0, not GitHub's "Use this template" button.
+Generation asks whether to include the tasks example; both choices keep PostgreSQL and migrations.
+It runs hooks that call Cargo and Unix `ln`, so review them before approving.
 
-Template maintainers run `TEST_DATABASE_URL=postgres://localhost/postgres make template-test` to check the Liquid twins and fully verify both generated variants, each with default features and `api-doc`.
-This requires the dedicated test server described under [Develop](#develop).
-`make template-test-fast` wraps `python3 scripts/template_test.py --fast-only` to run the same feature matrix without database checks.
-`--structure-only` checks generation and locked metadata only; it does not run lint or tests.
-`make ci-tools` installs checksum-verified actionlint 1.7.12 under `.tools/bin`; `make ci-config-check` checks the actual workflow files with it.
-Rust is pinned in `rust-toolchain.toml`; Taplo, cargo-deny and cargo-generate are pinned in `Makefile`.
+Template maintainers check both generated variants with `TEST_DATABASE_URL=postgres://localhost/postgres make template-test`, or with `make template-test-fast` without database tests.
 
 {% endif %}## Run it
 
-You need Rust (the pinned version in `rust-toolchain.toml` installs itself) and the pinned Taplo and cargo-deny CLIs (`make tools`).
-Database operations need an already-running PostgreSQL server; PostgreSQL 18 is the tested version.
-Create the application's database once, then apply its migrations:
+You need the Rust version in `rust-toolchain.toml`, which installs itself, the tools from `make tools`, and a running PostgreSQL server (18 is tested).
 
 ```sh
-cp .example.env .env
-# Set DATABASE_URL in .env to your application's PostgreSQL database before running.
+cp .example.env .env       # then set DATABASE_URL in .env
 createdb {{crate_name}}
 make migrate
 make run
 curl localhost:8080/health    # {"status":"ok"}
 ```
 
-`/health` works without PostgreSQL. Database connections are acquired only when database operations need them.
-The binary reads its process environment; `make run` and `make migrate` load `.env` for local use.
-`DATABASE_URL` must be explicitly supplied; a missing value stops startup instead of selecting a local database.
-`.example.env` supplies a placeholder for local setup, not a runtime default.
+`/health` answers without PostgreSQL; the service connects only when a request needs the database.
+The binary reads its process environment; `make run` and `make migrate` also load `.env`.
 
 ### Configure it
 
-[.example.env](.example.env) lists the settings and local example values. Supply production settings through the process environment.
-To allow browser access, set `HTTP_CORS_ALLOWED_ORIGINS` to comma-separated HTTP(S) origins.
-An origin such as `https://*.example.com` includes the apex and subdomains, but only with the same scheme and port.
-The empty allowlist permits no cross-origin browser access; CORS is not authentication or authorization.
-`HTTP_REQUEST_TIMEOUT_SECS` sets the request deadline; `HTTP_REQUEST_BODY_LIMIT_BYTES` limits buffered request bodies.
-`DATABASE_ACQUIRE_TIMEOUT_SECS` (whole seconds from 1 to 300, default 10) bounds how long a request waits for a database connection; at or above the request deadline, a request still waiting for a connection ends with 504 at that deadline instead.
-`DATABASE_STATEMENT_TIMEOUT_SECS` (whole seconds from 1 to 300, default 10) sets PostgreSQL's `statement_timeout` on each service connection: PostgreSQL cancels a query that runs longer, and its request gets 500.
-It overrides a `statement_timeout` in `DATABASE_URL`. Keep it below `HTTP_REQUEST_TIMEOUT_SECS`, or a query can keep its connection after its request has ended.
-{% if include_tasks %}When the statement timeout cancels a task query, the `task persistence failed` log line carries the reason `statement_timeout`. A query cancelled by hand, such as with `pg_cancel_backend`, has the same PostgreSQL code, so it logs that reason too.
-{% endif %}`make migrate` does not apply this setting, so a long migration, such as building an index, can finish.
-The limit is sent as a connection startup option, which a connection pooler such as PgBouncer can refuse or drop; check yours before relying on the limit.
+[.example.env](.example.env) lists every setting. An invalid value stops startup with a message that names the setting.
 
-### Optional API documentation
+| Setting | Default | Meaning |
+|---|---|---|
+| `PORT` | 8080 | Port the service listens on |
+| `RUST_LOG` | `info` | Log filter |
+| `LOG_FORMAT` | `pretty` | `pretty` or `json` |
+| `DATABASE_URL` | required | PostgreSQL connection URL |
+| `DATABASE_MAX_CONNECTIONS` | 10 | Pool size |
+| `DATABASE_ACQUIRE_TIMEOUT_SECS` | 10 | How long a request waits for a free connection, 1 to 300 |
+| `DATABASE_STATEMENT_TIMEOUT_SECS` | 10 | PostgreSQL cancels a longer query, 1 to 300; keep it below the request timeout |
+| `HTTP_REQUEST_TIMEOUT_SECS` | 30 | Request deadline; a later answer is 504 |
+| `HTTP_REQUEST_BODY_LIMIT_BYTES` | 1048576 | Largest buffered request body |
+| `HTTP_CORS_ENABLED` | `true` | Turns the CORS middleware on or off |
+| `HTTP_CORS_ALLOWED_ORIGINS` | empty | Comma-separated browser origins; `https://*.example.com` also allows its subdomains |
 
-API documentation is compiled out by default. To enable it, supply a nonempty
-`API_DOC_PASSWORD` through the process environment or your ignored local `.env`, then run:
+An empty origin list allows no cross-origin browser access. CORS is not authentication.
+`make migrate` ignores the statement timeout, so long migrations can finish. A connection pooler such as PgBouncer may drop it.
+For an encrypted database connection, add `sslmode=verify-full` to `DATABASE_URL`, and `sslrootcert` when the system does not trust the server's CA. Quote the URL in `.env` when it contains `&`.
+Keep real credentials out of committed files.
+
+### API documentation
+
+Swagger UI is compiled out by default. To include it, set `API_DOC_PASSWORD`, and optionally `API_DOC_USERNAME` (default `docs`), then:
 
 ```sh
 make run FEATURES=api-doc
 ```
 
-Open `/docs/` for Swagger UI; `/docs/openapi.json` serves its OpenAPI JSON.
-The UI, JSON and all UI assets share one HTTP Basic authentication scope.
-`API_DOC_USERNAME` is optional and defaults to `docs` only when absent; explicitly invalid
-values fail startup. `API_DOC_PASSWORD` is required only with `api-doc` enabled and has
-no default. Never commit credentials; credential errors and logs must not reveal their values.
-
-Use HTTPS at the ingress or reverse proxy outside local development: Basic authentication
-does not encrypt credentials. The HTTPS ingress owns HSTS.
-This authentication protects documentation only; it does not add authentication to API routes.
-Vendored UI assets need no CDN. “Try it out” uses the same origin, including `/health`;
-no broader CORS allowlist is needed, and the API's strict CSP remains unchanged.
-{% if include_tasks %}The schema includes the tasks routes only when that example is included.
-{% endif %}
-Feature-enabled checks use the same targets:
-
-```sh
-make test FEATURES=api-doc       # still no PostgreSQL
-# Requires the dedicated test server described below:
-TEST_DATABASE_URL=postgres://localhost/postgres make check FEATURES=api-doc
-```
-
-### Database transport and connection options
-
-For deployments requiring authenticated encryption, set `sslmode=verify-full` in `DATABASE_URL` and use the database server's certificate hostname.
-If its CA is not in the platform trust store, also supply `sslrootcert` pointing to the trusted public CA certificate.
-The default `sslmode=prefer` permits plaintext fallback; it does not require encryption.
-When putting a URL with `&` query separators in a shell-loaded `.env`, quote the complete value.
-Supply real credentials through the deployment environment or an ignored local file, never committed examples.
+`/docs/` serves the UI and `/docs/openapi.json` the schema, both behind HTTP Basic authentication. Serve them only over HTTPS.
+This protects the documentation only, not the API routes.
 
 ### Run it in a container
-
-The image holds the service and its migration command on a minimal non-root runtime with no shell.
-Compose runs only the service: PostgreSQL must already be running, and nothing here starts it.
 
 ```sh
 make image             # build the production image
 make compose-migrate   # apply migrations from the image
-make compose-up        # start the service; starting it never applies migrations
-make compose-down      # stop and remove the service container
+make compose-up        # start the service; fails unless GET /health answers within 30 s
+make compose-down      # stop and remove it
 ```
 
-Compose reads `.env`, or the file `SERVICE_ENV_FILE` names; `compose-up` and `compose-migrate` stop when that file is missing.
-`PORT` picks the port on this machine; inside the container the service always listens on 8080. An exported shell `PORT` overrides the file's.
-Inside a container, `localhost` is the container itself, so reach PostgreSQL on this machine as `host.docker.internal`, for example `DATABASE_URL=postgres://<user>@host.docker.internal:5432/<database>`.
-`make run` needs `localhost`, so keep the container's settings in a second file, which Git and the image both ignore:
-
-```sh
-SERVICE_ENV_FILE=.env.container make compose-up
-```
-
-The service accepts connections only from this machine. Read its logs with `docker compose logs`.
-`make compose-up` fails, printing the service's log, unless `GET /health` answers within 30 seconds.
-The container then starts again with Docker, after a reboot too, until `make compose-down` removes it.
-These targets need Docker with Compose 2.24.0 or later; Colima is the tested local runtime.
+Compose reads `.env`, or the file named by `SERVICE_ENV_FILE`, and never starts PostgreSQL.
+Inside the container the service listens on 8080; `PORT` picks the port on this machine, which only this machine can reach.
+Reach a PostgreSQL on this machine as `host.docker.internal`, and keep those settings in a second file, for example `SERVICE_ENV_FILE=.env.container make compose-up`.
+The container restarts after a crash or a reboot until `make compose-down`. These targets need Docker with Compose 2.24.0 or later.
 
 ## Deploy it
 
-This recipe runs one release on one VM with Docker Compose, behind nginx with Cloudflare in front.
-The VM builds the image from a release tag, so no image registry is needed; it compiles the service again for each deploy and rollback.
+This runs one release on one VM with Docker Compose, behind nginx and Cloudflare. The VM builds the image from a release tag, so no registry is needed.
 
 ### Prepare the VM
 
-- Docker Engine with Compose 2.24.0 or later, started at boot, a deploy user in the `docker` group, and `curl`.
-- nginx.
-- A PostgreSQL server on another host, or a managed one, that the VM can reach, with the application's database created. For TLS settings, see [Database transport and connection options](#database-transport-and-connection-options).
-  This recipe does not cover a PostgreSQL on the VM itself: a container reaches the VM only through Docker's networks, which needs PostgreSQL, `pg_hba.conf` and firewall changes the recipe has not tested.
+- Docker Engine with Compose 2.24.0 or later, a deploy user in the `docker` group, `curl` and nginx.
+- A PostgreSQL server on another host, or a managed one, with the application's database created.
 - A clone of this repository at `/srv/{{project-name}}`, owned by the deploy user.
 
-Keep the settings outside the checkout, readable only by the deploy user. Running this again keeps an existing file's contents:
+Keep the settings outside the checkout, readable only by the deploy user:
 
 ```sh
 mkdir -p ~/.config/{{project-name}}
@@ -155,16 +109,12 @@ make compose-migrate
 make compose-up
 ```
 
-`make compose-migrate` builds the image from the checked-out tag, then applies its migrations.
-`make compose-up` replaces the running container, so requests fail for a few seconds. It then fails, printing the service's log, unless `GET /health` answers within 30 seconds.
-By then the old release is stopped: read the log, then fix the settings and run `make compose-up` again, or follow [Roll back](#roll-back).
-For an api-doc build, add `FEATURES=api-doc` to every `make` command in this section, the rollback included.
-The service restarts after a crash or a reboot until `make compose-down` stops it, and Docker keeps at most 3 log files of 10 MB for it.
+Requests fail for a few seconds while the container is replaced. If `make compose-up` fails, read the printed log, fix the settings and run it again, or roll back.
+For an api-doc build, add `FEATURES=api-doc` to every `make` command here and in the rollback.
 
 ### Put nginx in front
 
-nginx forwards traffic to the service's `127.0.0.1` port, which stays closed to other machines.
-The block below assumes `PORT=8080`; put your `PORT` in `proxy_pass`.
+Set `proxy_pass` to your `PORT`.
 
 ```nginx
 # /etc/nginx/conf.d/{{project-name}}.conf
@@ -189,8 +139,8 @@ server {
 
 Set up Cloudflare in one of two ways:
 
-- **Proxied DNS.** Point a proxied DNS record at the VM, set SSL/TLS mode to Full (strict), and save a Cloudflare Origin Certificate and its key as the two files above, with the key at mode 600.
-- **Cloudflare Tunnel.** Use the `listen 127.0.0.1:80;` line, with no certificate and no open port. In the `cloudflared` configuration, forward the hostname to nginx:
+- **Proxied DNS:** point a proxied record at the VM, set SSL/TLS to Full (strict), save a Cloudflare Origin Certificate and its key as the two files above (key at mode 600), and let the firewall accept port 443 only from [Cloudflare's ranges](https://www.cloudflare.com/ips/).
+- **Cloudflare Tunnel:** use `listen 127.0.0.1:80;`, open no port, and forward the hostname in the `cloudflared` configuration:
 
   ```yaml
   ingress:
@@ -199,17 +149,15 @@ Set up Cloudflare in one of two ways:
     - service: http_status:404
   ```
 
-Then check the configuration and reload nginx:
+Then check and reload nginx:
 
 ```sh
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-With proxied DNS, allow port 443 only from [Cloudflare's address ranges](https://www.cloudflare.com/ips/) in the VM's or your cloud provider's firewall, so nobody reaches the VM around Cloudflare. A Tunnel needs no open port.
-
 ### Roll back
 
-Check out the earlier tag and start it, without migrating:
+Start the earlier tag without migrating:
 
 ```sh
 cd /srv/{{project-name}}
@@ -218,151 +166,66 @@ export SERVICE_ENV_FILE=~/.config/{{project-name}}/service.env
 make compose-up
 ```
 
-`make compose-up` checks `GET /health` as it does on a deploy.
-Migrations are never undone, and an older `migrate` command refuses a database that has newer migrations.
-Roll back only to a release whose code works with the newer schema, which is why a migration should add columns and tables before a later release removes old ones.
+Migrations are never undone, and an older `migrate` refuses a newer schema. Roll back only to a release that works with the newer schema; that is why a migration adds columns and tables before a later release removes old ones.
 
 {% if include_tasks %}## Tasks example
 
 ```sh
-curl -X POST localhost:8080/v1/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"title":"Write documentation"}'
+curl -X POST localhost:8080/v1/tasks -H 'Content-Type: application/json' -d '{"title":"Write documentation"}'
 curl 'localhost:8080/v1/tasks/<id>'
 curl -X POST 'localhost:8080/v1/tasks/<id>/complete'
 ```
 
-Create returns `201`; get and complete return `200` with the task.
-Completing an already-completed task returns `409`.
-Titles are preserved as submitted and must contain 1–200 Unicode characters, excluding U+0000; invalid titles return `400`.
+Create returns 201, get and complete return 200, and completing a completed task returns 409. A title has 1 to 200 characters; any other title returns 400.
 
 {% endif %}## Develop
 
 ```sh
-make hooks-install   # check formatting before each commit
-make test            # fast unit, service and in-memory HTTP tests; no PostgreSQL
-make lint            # Rust/TOML formatting and Clippy; no PostgreSQL
-make audit           # advisories, licenses and sources in Cargo.lock; needs network
-make help            # every target
+make hooks-install                  # check formatting before each commit
+make test                           # unit and in-memory HTTP tests; no PostgreSQL
+make test-crate CRATE=environment   # one package's tests
+make lint                           # formatting and Clippy
+make audit                          # advisories, licenses and sources in Cargo.lock; needs network
+make help                           # every target
 ```
 
-For package-only tests, use `make test-crate CRATE=environment`, optionally with `FEATURES=api-doc`.
-`CRATE` must exactly name a workspace Cargo package; an unknown name never falls back to workspace tests.
-
-After changing repository SQL, migrations, database types or concurrency behavior, run:
-
-```sh
-TEST_DATABASE_URL=postgres://localhost/postgres make test-db
-```
-
-After changing the Dockerfile, `.dockerignore`, the Compose file or how the service starts, build and run the image with the container targets above. They need Docker. No automated check starts the image.
-
-Before proposing the complete change for publication, run:
-
-```sh
-TEST_DATABASE_URL=postgres://localhost/postgres make check
-```
-
-Use a **dedicated test server**, not production. Its role needs `CREATEDB` permission.
-Database tests create isolated databases and may leave failed-test databases or harness bookkeeping for inspection.
-They require `TEST_DATABASE_URL`; no `make` command starts PostgreSQL automatically.
-The pre-commit hook remains database-free.
+After changing SQL, migrations or database code, run `TEST_DATABASE_URL=postgres://localhost/postgres make test-db`.
+Before publishing a change, run `TEST_DATABASE_URL=postgres://localhost/postgres make check`, and again with `FEATURES=api-doc`.
+Use a dedicated test server whose role can create databases. No `make` target starts PostgreSQL.
+After changing the Dockerfile, the Compose file or startup, run the container targets above by hand.
 
 ## GitHub automation
 
-{% if template_source %}The plain `.github/workflows/format.yml` is retained in both the template source and generated services.
-{% else %}The plain `.github/workflows/format.yml` checks formatting only, regardless of repository visibility; there is no `main`-push automation.
-{% endif %}It checks Rust and TOML formatting when a pull request is opened, updated or reopened, including drafts.
-Private-repository formatting installs pinned prebuilt Taplo rather than compiling it.
+- `.github/workflows/format.yml` checks formatting on every pull request, drafts included.
+{% if template_source %}- `.github/workflows/template-ci.yml`, in the template only, runs Clippy, the tests and the audit for the source and both generated variants on ready pull requests and pushes to `main`.
+{% endif %}- `.github/workflows/audit.yml` runs `make audit` every Monday and on demand from **Actions > Dependency audit**. GitHub pauses it in a public repository after 60 days without activity; **Enable workflow** restarts it.
+- Dependabot opens weekly grouped updates for Cargo and GitHub Actions.
 
-{% if template_source %}The source-only `.github/workflows/template-ci.yml` is excluded from generation by `.genignore`.
-It runs Clippy and fast tests with default features and `api-doc`, database-free checks of both generated variants that include the audit, and then the dependency audit of the template source, on reviewable pull requests and pushes to `main`.
-The source audit still runs after an earlier check fails.
-Source drafts run formatting only: `ready_for_review` starts heavy validation, and `converted_to_draft` cancels it.
-Generated services retain formatting-only defaults regardless of repository visibility, with no `main`-push automation.
-Pull request and `main` CI do not replace full `make check` (default and `FEATURES=api-doc`) or `make template-test`; these still require the existing dedicated `TEST_DATABASE_URL` server.
-The release workflow runs `make test-db` on this repository's code, but it does not test generated variants, so `make template-test` stays a manual check.
-
-{% endif %}The plain `.github/workflows/audit.yml` runs `make audit` on the default branch every Monday at 06:17 UTC, or when started from **Actions > Dependency audit > Run workflow**, with read-only permissions.
-{% if template_source %}Generated services keep it unchanged.
-{% endif %}A failed run shows in the Actions tab, and its log names the crate and the advisory, license or source.
-GitHub pauses scheduled workflows in a public repository after 60 days without activity; **Enable workflow** on that workflow's Actions page starts them again.
-
-Pull request workflows use read-only `pull_request` permissions, optional caches, and no production secrets or databases.
-For public repositories, in **Settings > Actions > General**, select **Require approval for all external contributors** for workflows from fork pull requests.
-For private repositories with fork workflows enabled, the corresponding approval policy covers fork contributors without write permission, not trusted collaborators' own pull requests.
-Repository approval settings are not copied by generation; configure the applicable policy separately. This documentation change does not change GitHub settings.
-Dependabot opens weekly grouped Cargo and GitHub Actions dependency proposals; auto-merge is not enabled.
-
-See **Actions > workflow run > job** for actual elapsed job time.
-Repository or organization **Settings > Billing and licensing > Usage** shows billed Actions minutes (billing access is required).
-Elapsed time and billed minutes differ; there are no runtime guarantees.
+Pull request workflows have read-only permissions and no secrets.
+For public repositories, set **Settings > Actions > General** to require approval for all external contributors. For private repositories, the approval setting covers fork contributors without write permission. Generation does not copy these settings.
 
 ### Maintainer-requested checks
 
-On an open pull request, create a comment containing exactly one command:
+On an open pull request, a maintainer with write access comments exactly one command:
 
-| Command | Work |
+| Command | Runs |
 |---|---|
 | `/lint` | `make lint` |
 | `/test` | `make test` with default features and `api-doc` |
-| `/test-{crate}` | One workspace package's default tests and `api-doc` when it declares that feature |
+| `/test-{crate}` | one workspace package's tests, such as `/test-environment` |
 
-For example, `/test-environment` tests the configuration package; `/test-{{project-name}}` tests the service package.
-Use Cargo package names, not Rust import names, directories, arguments or wildcards.
-These checks are database-free; partial runs compile dependencies but do not run other packages' suites.
-There are no additional comment commands.
-
-The commenter needs repository write, maintain or admin permission; association labels alone are not authorization.
-Comments on issues, edits, extra whitespace and unauthorized commands do not dispatch workers.
-Routing and acceptance both require GitHub's explicit unedited-comment metadata; timestamp equality alone cannot detect same-second edits.
-Each accepted command captures the current head SHA. A changed head needs a fresh command; an earlier run checks only its captured commit.
-Another identical command supersedes its earlier run, while different commands, packages and PRs execute independently.
-Repeat checks with a new comment, not **Re-run jobs** or manual worker dispatch.
-
-Each accepted command shows a commit status on its captured head, such as `ci-command /test` or `ci-command /lint`.
-Package commands add a short hash suffix, so `/test-Foo` and `/test-foo` keep separate statuses.
-The status is pending while the worker runs, then success or failure. It is error when the run was cancelled or timed out, the head changed or validation failed.
-Its details link opens the **CI command worker** run with the ordinary logs.
-A new commit has no status until someone posts a new command.
-The original comment stays plain text; no bot comment, test-count report or coverage comparison is published.
-Historical `ci-comment` statuses may remain pending; they are not completion evidence or supported required checks.
-Do not require controller jobs, worker jobs or `ci-command-state/` bookkeeping contexts as a merge gate.
-
-The dispatcher, read-only worker and execution helpers are retained in generated services.
-They become active only after reaching the default branch; posting a command cannot test a new workflow definition that exists only on a PR.
-An authorized command explicitly approves execution of that PR head, including fork and draft code, on a read-only hosted worker with no production secrets.
-That code can write default-branch cache entries that later workflows can restore, so read the PR code before posting a command.
-The controller uses trusted default-branch code and never executes the PR or its artifacts.
-Only the controller and the worker's separate report job can write commit statuses, and neither checks out PR code; no command job has PR-comment write permission.
-See [the security and hosted-validation procedure](docs/ci-commands.md) for the execution and bookkeeping boundaries.
-This change does not enable branch protection or modify repository settings.
+The result appears as a commit status on the pull request's current head, such as `ci-command /test`, with a link to the run. A new commit needs a new command; to run it again, post the command again instead of using **Re-run jobs**.
+The command runs the pull request's code, and that code can write default-branch cache entries, so read the PR code before posting a command.
 
 ### Release a version
 
-A maintainer releases by hand. Pushes and merges never create a tag.
-Set the service package `version` in its `Cargo.toml` and merge that change to `main`.
-Internal crates stay at `0.1.0` with `publish = false`; only the service package version must match the tag.
-Then open **Actions > Release > Run workflow**, or run:
+1. Set the service package `version` in `{{project-name}}/Cargo.toml` and merge it to `main`.
+2. Run `gh workflow run release.yml -f version=1.2.3`. This is a dry run that checks everything and creates nothing.
+3. Run it again with `-f dry_run=false` to create the `v1.2.3` tag and a GitHub Release.
 
-```sh
-gh workflow run release.yml -f version=1.2.3
-```
-
-The release is always the current `main` head. To release a change, release it before merging anything newer.
-`dry_run` defaults to true: the run checks everything and creates nothing.
-Run it again with `-f dry_run=false` to create the `v1.2.3` tag and a GitHub Release with generated notes.
-
-The run fails before any tag exists when the version is not `X.Y.Z`, `main` has moved since the run started, the service package version differs, the tag already exists, or any existing run, check or status on the commit failed or is still running.
-Only GitHub Actions runs from `push` and `pull_request` events count, because manual, comment and scheduled runs report on the `main` head whatever they test. Checks from other apps still count, and `ci-command-state/` bookkeeping statuses do not.
-A run from a fork pull request does not count, nor do its checks, because the fork's author chooses what it tests and can leave it waiting for approval.
-A cancelled check run does not block, whoever cancelled it, and the run's own lint and tests are the only replacement for it. A cancelled command's `error` status still blocks.
-It then runs `make audit`, then `make lint`, `make test` and `make test-db` with default features and `api-doc` on the commit. The database tests use a temporary PostgreSQL that the run starts for itself.
-It then runs `make image`, so a Dockerfile that no longer builds stops the release. The release never starts the image.
-Only the final job, which runs after every check passes, has permission to write.
-Anyone with write access can run the workflow, so it adds no approval beyond repository permissions.
+The release always takes the current `main` head. It stops before creating a tag when the version does not match, the tag exists, `main` moved, or a check on the commit failed or is still running. A run from a fork pull request does not count, nor do its checks, because its author can leave it waiting for approval.
+It then runs the audit, lint, the tests including `make test-db`, and builds the image.
 
 ## Changing the service
 
-Read [AGENTS.md](AGENTS.md) for coding rules and required checks.
-Use [docs/architecture.md](docs/architecture.md) when deciding where new code belongs or changing dependency composition, configuration, or resource ownership.
+Read [AGENTS.md](AGENTS.md) for the coding rules and checks, and [docs/architecture.md](docs/architecture.md) for where new code belongs.
