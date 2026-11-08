@@ -405,7 +405,7 @@ class CiPolicyTest(unittest.TestCase):
     def test_guidance_describes_the_audit(self):
         for name in ("AGENTS.md", "AGENTS.md.liquid"):
             text = (ROOT / name).read_text()
-            self.assertIn("it includes lint, the dependency audit, fast tests and real database tests",
+            self.assertIn("it includes lint, fast tests, real database tests and then the dependency audit",
                           text, name)
             self.assertIn("`make audit`", text, name)
         for name in ("README.md", "README.md.liquid"):
@@ -562,7 +562,7 @@ class AuditPolicyTest(unittest.TestCase):
 
     def test_full_check_audits_but_the_commit_hook_does_not(self):
         makefile = (ROOT / "Makefile").read_text()
-        self.assertRegex(makefile, r"(?m)^check: lint audit test test-db ##")
+        self.assertRegex(makefile, r"(?m)^check: lint test test-db audit ##")
         self.assertNotIn("audit", (ROOT / ".githooks/pre-commit").read_text())
 
     def audit(self, version):

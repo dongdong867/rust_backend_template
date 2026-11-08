@@ -104,7 +104,7 @@ lint: fmt-check fmt-toml-check clippy ## Run every static check
 audit: cargo-deny-version ## Check Cargo.lock for advisories, licenses and sources; needs network
 	cargo-deny --locked check
 
-check: lint audit test test-db ## Run the full pre-publication check (requires TEST_DATABASE_URL)
+check: lint test test-db audit ## Run the full pre-publication check (requires TEST_DATABASE_URL)
 
 hooks-install: ## Use the pre-commit hook in .githooks
 	git config core.hooksPath .githooks
