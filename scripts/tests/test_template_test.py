@@ -138,10 +138,9 @@ class TemplateChecksTest(unittest.TestCase):
         for fast_only, structure_only in ((True, False), (False, False), (False, True)):
             calls = []
 
-            def record(name, result=None):
-                def call(*args, **kwargs):
-                    calls.append((name, args[0] if args else None))
-                    return result(*args) if result else None
+            def record(name):
+                def call(project, *_, **flags):
+                    calls.append((name, project, flags))
                 return call
 
             def generated(executable, source, destination, name, include_tasks):
@@ -160,10 +159,12 @@ class TemplateChecksTest(unittest.TestCase):
                                              fast_only=fast_only, structure_only=structure_only)
             with_example = self.output / "generated-with-example"
             without_example = self.output / "generated-without-example"
-            expected = [("check", with_example), ("rebuild", with_example),
-                        ("check", without_example), ("rebuild", without_example)]
+            check = {"fast_only": fast_only, "structure_only": structure_only}
+            rebuild = {"structure_only": structure_only}
+            expected = [("check", with_example, check), ("rebuild", with_example, rebuild),
+                        ("check", without_example, check), ("rebuild", without_example, rebuild)]
             if not structure_only:
-                expected.append(("audit", [with_example, without_example]))
+                expected.append(("audit", [with_example, without_example], {}))
             self.assertEqual(calls, expected)
 
     def test_audit_generated_reports_every_failed_variant(self):
