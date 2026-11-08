@@ -41,8 +41,10 @@ def jobs(text):
 
 # A condition or continue-on-error on this step would let a failed audit pass the job.
 AUDIT_STEP = "      - name: Audit dependencies\n        run: make audit"
-# `!cancelled()` runs the audit after an earlier step fails; it never lets a failed audit pass.
-AUDIT_STEP_ALWAYS = ("      - name: Audit dependencies\n        if: ${{ !cancelled() }}\n"
+# This runs the audit after a later check fails, but not without cargo-deny installed.
+# It never lets a failed audit pass.
+AUDIT_STEP_ALWAYS = ("      - name: Audit dependencies\n"
+                     "        if: ${{ !cancelled() && steps.deny.outcome == 'success' }}\n"
                      "        run: make audit")
 
 
@@ -81,7 +83,7 @@ class CiPolicyTest(unittest.TestCase):
 
     def test_source_validation_audits_dependencies(self):
         validate = jobs(self.workflow("template-ci.yml"))["validate"]
-        install = validate.index("      - name: Install prebuilt cargo-deny\n")
+        install = validate.index("      - name: Install prebuilt cargo-deny\n        id: deny\n")
         self.assertIn("tool: cargo-deny@${{ steps.tools.outputs.cargo-deny }}\n"
                       "          fallback: none\n", validate[install:])
         audit = validate.index("        run: make audit\n")
