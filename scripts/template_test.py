@@ -22,6 +22,7 @@ SHARED_CI_FILES = (
     ".github/workflows/ci-command.yml", ".github/workflows/ci-command-worker.yml",
     ".github/ci/comment_ci.py", ".github/ci/test_crate.py",
     ".github/workflows/release.yml", ".github/ci/release.py", ".github/ci/github_client.py",
+    ".github/workflows/audit.yml",
 )
 REBUILD_PROBE = "migrations/99999999999999_rebuild_probe.sql"
 REBUILD_COMMANDS = (
@@ -260,11 +261,27 @@ def check_generated(project, *, fast_only=False, structure_only=False):
     if structure_only:
         return
     environment = cargo_environment()
-    targets = ["lint", "test"] if fast_only else ["check"]
+    # Full mode mirrors `check:` in the Makefile without `audit`, which audit_generated runs later.
+    targets = ["lint", "test"] if fast_only else ["lint", "test", "test-db"]
     for feature in ("", "api-doc"):
         command = ["make", *targets, f"FEATURES={feature}"]
         print("+", " ".join(command), flush=True)
         subprocess.run(command, cwd=project, env=environment, check=True)
+
+
+def audit_generated(projects):
+    """Audit every project once, so one variant's advisory does not hide another's result.
+
+    The audit ignores FEATURES, so it runs once per variant, after every other variant check.
+    """
+    environment = cargo_environment()
+    failed = []
+    for project in projects:
+        print("+ make audit", f"({project.name})", flush=True)
+        result = subprocess.run(["make", "audit"], cwd=project, env=environment, check=False)
+        if result.returncode != 0:
+            failed.append(project.name)
+    require(not failed, f"make audit failed in: {', '.join(failed)}")
 
 
 def built_executables(project, environment):
@@ -309,13 +326,27 @@ def check_migration_rebuild(project, include_tasks, *, structure_only=False):
                        "Each package that embeds migrations needs a build.rs watching them.")
 
 
+def check_variants(executable, source, destination, *, fast_only, structure_only):
+    """Generate and check both variants, then audit them so an advisory hides no other result."""
+    projects = []
+    for include_tasks in (True, False):
+        name = "generated-with-example" if include_tasks else "generated-without-example"
+        project = generate(executable, source, destination, name, include_tasks)
+        check_project(project, name, include_tasks)
+        check_generated(project, fast_only=fast_only, structure_only=structure_only)
+        check_migration_rebuild(project, include_tasks, structure_only=structure_only)
+        projects.append(project)
+    if not structure_only:
+        audit_generated(projects)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     checks = parser.add_mutually_exclusive_group()
     checks.add_argument("--structure-only", action="store_true",
                         help="Check generation and locks only; do not claim full make check coverage.")
     checks.add_argument("--fast-only", action="store_true",
-                        help="Also lint and test generated code, but omit real PostgreSQL checks.")
+                        help="Also lint, audit and test generated code, but omit real PostgreSQL checks.")
     args = parser.parse_args()
     if not args.structure_only and not args.fast_only:
         require(os.environ.get("TEST_DATABASE_URL"),
@@ -331,20 +362,16 @@ def main():
         canonical = generate(executable, source, temporary / "canonical", CANONICAL_NAME, True,
                              template_source=True)
         check_twins(source, canonical)
-        for include_tasks in (True, False):
-            name = "generated-with-example" if include_tasks else "generated-without-example"
-            project = generate(executable, source, temporary / "variants", name, include_tasks)
-            check_project(project, name, include_tasks)
-            check_generated(project, fast_only=args.fast_only,
-                            structure_only=args.structure_only)
-            check_migration_rebuild(project, include_tasks, structure_only=args.structure_only)
+        check_variants(executable, source, temporary / "variants", fast_only=args.fast_only,
+                       structure_only=args.structure_only)
     if args.structure_only:
         print("Generation structure and locked metadata passed; full make check was NOT run.")
     elif args.fast_only:
-        print("Both generated variants passed default and api-doc lint and fast tests; "
+        print("Both generated variants passed default and api-doc lint, audit and fast tests; "
               "PostgreSQL checks were NOT run.")
     else:
-        print("Template twins and both generated variants passed default and api-doc full make check.")
+        print("Template twins and both generated variants passed default and api-doc lint, fast and "
+              "database tests, and the audit.")
 
 
 if __name__ == "__main__":

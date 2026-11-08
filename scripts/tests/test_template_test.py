@@ -117,12 +117,11 @@ class TemplateChecksTest(unittest.TestCase):
             }):
                 for project in (self.source, self.output):
                     template_test.check_generated(project, fast_only=fast_only)
-                targets = ["lint", "test"] if fast_only else ["check"]
-                self.assertEqual(
-                    [call.args[0] for call in run.call_args_list],
-                    [["make", *targets, f"FEATURES={feature}"]
-                     for _ in range(2) for feature in ("", "api-doc")],
-                )
+                # The parts of make check except the audit, which audit_generated runs later.
+                targets = ["lint", "test"] if fast_only else ["lint", "test", "test-db"]
+                variant = [["make", *targets, f"FEATURES={feature}"]
+                           for feature in ("", "api-doc")]
+                self.assertEqual([call.args[0] for call in run.call_args_list], variant * 2)
                 for call in run.call_args_list:
                     self.assertTrue(call.kwargs["check"])
                     for setting in ("API_DOC_USERNAME", "API_DOC_PASSWORD", "DATABASE_URL",
@@ -131,8 +130,65 @@ class TemplateChecksTest(unittest.TestCase):
                         self.assertFalse(setting in call.kwargs["env"], setting)
                     self.assertEqual(call.kwargs["env"]["CARGO_TARGET_DIR"],
                                      str(template_test.ROOT / "target/template-test"))
+                calls = len(variant)
                 self.assertEqual([call.kwargs["cwd"] for call in run.call_args_list],
-                                 [self.source, self.source, self.output, self.output])
+                                 [self.source] * calls + [self.output] * calls)
+
+    def test_variants_are_audited_after_every_other_variant_check(self):
+        for fast_only, structure_only in ((True, False), (False, False), (False, True)):
+            calls = []
+
+            def record(name):
+                def call(project, *_, **flags):
+                    calls.append((name, project, flags))
+                return call
+
+            def generated(executable, source, destination, name, include_tasks):
+                return destination / name
+
+            with self.subTest(fast_only=fast_only, structure_only=structure_only), \
+                    patch.object(template_test, "generate", side_effect=generated), \
+                    patch.object(template_test, "check_project"), \
+                    patch.object(template_test, "check_generated",
+                                 side_effect=record("check")), \
+                    patch.object(template_test, "check_migration_rebuild",
+                                 side_effect=record("rebuild")), \
+                    patch.object(template_test, "audit_generated",
+                                 side_effect=record("audit")):
+                template_test.check_variants("cargo-generate", self.source, self.output,
+                                             fast_only=fast_only, structure_only=structure_only)
+            with_example = self.output / "generated-with-example"
+            without_example = self.output / "generated-without-example"
+            check = {"fast_only": fast_only, "structure_only": structure_only}
+            rebuild = {"structure_only": structure_only}
+            expected = [("check", with_example, check), ("rebuild", with_example, rebuild),
+                        ("check", without_example, check), ("rebuild", without_example, rebuild)]
+            if not structure_only:
+                expected.append(("audit", [with_example, without_example], {}))
+            self.assertEqual(calls, expected)
+
+    def test_audit_generated_reports_every_failed_variant(self):
+        def result(command, cwd, env, check):
+            return subprocess.CompletedProcess(command, 1 if cwd == self.source else 0)
+
+        with patch.object(template_test.subprocess, "run", side_effect=result) as run, \
+                patch.dict(os.environ, {"DATABASE_URL": "synthetic-application-database"}):
+            with self.assertRaisesRegex(RuntimeError, "make audit failed in: source$"):
+                template_test.audit_generated([self.source, self.output])
+        # A failed variant does not stop the next variant's audit.
+        self.assertEqual([(call.args[0], call.kwargs["cwd"]) for call in run.call_args_list],
+                         [(["make", "audit"], self.source), (["make", "audit"], self.output)])
+        for call in run.call_args_list:
+            self.assertFalse(call.kwargs["check"])
+            self.assertFalse("DATABASE_URL" in call.kwargs["env"])
+
+    def test_audit_generated_passes_when_every_variant_passes(self):
+        def result(command, cwd, env, check):
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(template_test.subprocess, "run", side_effect=result) as run:
+            template_test.audit_generated([self.source, self.output])
+        self.assertEqual(run.call_count, 2)
 
     def test_structure_only_does_not_run_make(self):
         with patch.object(template_test.subprocess, "run") as run:

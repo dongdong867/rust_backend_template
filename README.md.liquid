@@ -21,11 +21,11 @@ This requires the dedicated test server described under [Develop](#develop).
 `make template-test-fast` wraps `python3 scripts/template_test.py --fast-only` to run the same feature matrix without database checks.
 `--structure-only` checks generation and locked metadata only; it does not run lint or tests.
 `make ci-tools` installs checksum-verified actionlint 1.7.12 under `.tools/bin`; `make ci-config-check` checks the actual workflow files with it.
-Rust is pinned in `rust-toolchain.toml`; Taplo and cargo-generate are pinned in `Makefile`.
+Rust is pinned in `rust-toolchain.toml`; Taplo, cargo-deny and cargo-generate are pinned in `Makefile`.
 
 {% endif %}## Run it
 
-You need Rust (the pinned version in `rust-toolchain.toml` installs itself) and the pinned Taplo CLI (`make tools`).
+You need Rust (the pinned version in `rust-toolchain.toml` installs itself) and the pinned Taplo and cargo-deny CLIs (`make tools`).
 Database operations need an already-running PostgreSQL server; PostgreSQL 18 is the tested version.
 Create the application's database once, then apply its migrations:
 
@@ -242,6 +242,7 @@ Titles are preserved as submitted and must contain 1–200 Unicode characters, e
 make hooks-install   # check formatting before each commit
 make test            # fast unit, service and in-memory HTTP tests; no PostgreSQL
 make lint            # Rust/TOML formatting and Clippy; no PostgreSQL
+make audit           # advisories, licenses and sources in Cargo.lock; needs network
 make help            # every target
 ```
 
@@ -275,13 +276,19 @@ The pre-commit hook remains database-free.
 Private-repository formatting installs pinned prebuilt Taplo rather than compiling it.
 
 {% if template_source %}The source-only `.github/workflows/template-ci.yml` is excluded from generation by `.genignore`.
-It runs Clippy and fast tests with default features and `api-doc`, plus database-free checks of both generated variants, on reviewable pull requests and pushes to `main`.
+It runs Clippy and fast tests with default features and `api-doc`, database-free checks of both generated variants that include the audit, and then the dependency audit of the template source, on reviewable pull requests and pushes to `main`.
+The source audit still runs after an earlier check fails.
 Source drafts run formatting only: `ready_for_review` starts heavy validation, and `converted_to_draft` cancels it.
 Generated services retain formatting-only defaults regardless of repository visibility, with no `main`-push automation.
 Pull request and `main` CI do not replace full `make check` (default and `FEATURES=api-doc`) or `make template-test`; these still require the existing dedicated `TEST_DATABASE_URL` server.
 The release workflow runs `make test-db` on this repository's code, but it does not test generated variants, so `make template-test` stays a manual check.
 
-{% endif %}Pull request workflows use read-only `pull_request` permissions, optional caches, and no production secrets or databases.
+{% endif %}The plain `.github/workflows/audit.yml` runs `make audit` on the default branch every Monday at 06:17 UTC, or when started from **Actions > Dependency audit > Run workflow**, with read-only permissions.
+{% if template_source %}Generated services keep it unchanged.
+{% endif %}A failed run shows in the Actions tab, and its log names the crate and the advisory, license or source.
+GitHub pauses scheduled workflows in a public repository after 60 days without activity; **Enable workflow** on that workflow's Actions page starts them again.
+
+Pull request workflows use read-only `pull_request` permissions, optional caches, and no production secrets or databases.
 For public repositories, in **Settings > Actions > General**, select **Require approval for all external contributors** for workflows from fork pull requests.
 For private repositories with fork workflows enabled, the corresponding approval policy covers fork contributors without write permission, not trusted collaborators' own pull requests.
 Repository approval settings are not copied by generation; configure the applicable policy separately. This documentation change does not change GitHub settings.
@@ -350,7 +357,7 @@ The run fails before any tag exists when the version is not `X.Y.Z`, `main` has 
 Only GitHub Actions runs from `push` and `pull_request` events count, because manual, comment and scheduled runs report on the `main` head whatever they test. Checks from other apps still count, and `ci-command-state/` bookkeeping statuses do not.
 A run from a fork pull request does not count, nor do its checks, because the fork's author chooses what it tests and can leave it waiting for approval.
 A cancelled check run does not block, whoever cancelled it, and the run's own lint and tests are the only replacement for it. A cancelled command's `error` status still blocks.
-It then runs `make lint`, `make test` and `make test-db` with default features and `api-doc` on the commit. The database tests use a temporary PostgreSQL that the run starts for itself.
+It then runs `make audit`, then `make lint`, `make test` and `make test-db` with default features and `api-doc` on the commit. The database tests use a temporary PostgreSQL that the run starts for itself.
 It then runs `make image`, so a Dockerfile that no longer builds stops the release. The release never starts the image.
 Only the final job, which runs after every check passes, has permission to write.
 Anyone with write access can run the workflow, so it adds no approval beyond repository permissions.

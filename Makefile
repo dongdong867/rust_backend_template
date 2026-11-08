@@ -1,6 +1,7 @@
 # Every target runs from the repository root. CI calls the same targets.
 
 TAPLO_VERSION := 0.10.0
+CARGO_DENY_VERSION := 0.20.2
 CARGO_GENERATE_VERSION := 0.25.0
 ACTIONLINT_VERSION := 1.7.12
 FEATURES ?=
@@ -9,7 +10,7 @@ CARGO_FEATURES = $(if $(strip $(FEATURES)),--features "$(FEATURES)")
 IMAGE := rust-backend-template:local
 
 .DEFAULT_GOAL := help
-.PHONY: help run migrate build test test-crate test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint check hooks-install tools taplo-version image compose-up compose-down compose-migrate compose-settings compose-health
+.PHONY: help run migrate build test test-crate test-db template-test template-test-fast template-tools ci-tools ci-config-check tool-versions fmt fmt-check fmt-toml-check clippy lint audit check hooks-install tools taplo-version cargo-deny-version image compose-up compose-down compose-migrate compose-settings compose-health
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -70,7 +71,7 @@ compose-migrate: compose-settings image ## Apply migrations from the image, read
 template-test: ## Generate both variants and run their full checks (requires TEST_DATABASE_URL)
 	python3 scripts/template_test.py
 
-template-test-fast: ## Generate both variants and run lint and fast tests without PostgreSQL
+template-test-fast: ## Generate both variants and run lint, audit and fast tests without PostgreSQL
 	python3 scripts/template_test.py --fast-only
 
 template-tools: ## Install the pinned generator locally for template verification
@@ -83,7 +84,7 @@ ci-config-check: ci-tools ## Check the actual GitHub Actions workflows
 	python3 scripts/check_ci.py
 
 tool-versions: ## Print tool pins for CI without duplicating versions in workflows
-	@printf 'taplo=%s\ncargo-generate=%s\nactionlint=%s\n' '$(TAPLO_VERSION)' '$(CARGO_GENERATE_VERSION)' '$(ACTIONLINT_VERSION)'
+	@printf 'taplo=%s\ncargo-deny=%s\ncargo-generate=%s\nactionlint=%s\n' '$(TAPLO_VERSION)' '$(CARGO_DENY_VERSION)' '$(CARGO_GENERATE_VERSION)' '$(ACTIONLINT_VERSION)'
 
 fmt: taplo-version ## Format Rust and TOML files
 	cargo fmt --all
@@ -100,13 +101,20 @@ clippy: ## Run Clippy, failing on any warning
 
 lint: fmt-check fmt-toml-check clippy ## Run every static check
 
-check: lint test test-db ## Run the full pre-publication check (requires TEST_DATABASE_URL)
+audit: cargo-deny-version ## Check Cargo.lock for advisories, licenses and sources; needs network
+	cargo-deny --locked check
+
+check: lint test test-db audit ## Run the full pre-publication check (requires TEST_DATABASE_URL)
 
 hooks-install: ## Use the pre-commit hook in .githooks
 	git config core.hooksPath .githooks
 
-tools: ## Install the pinned Taplo CLI
+tools: ## Install the pinned Taplo and cargo-deny CLIs
 	cargo install --locked taplo-cli --version $(TAPLO_VERSION)
+	cargo install --locked cargo-deny --version $(CARGO_DENY_VERSION)
 
 taplo-version:
 	@taplo --version 2>/dev/null | grep -qx 'taplo $(TAPLO_VERSION)' || { echo "Taplo $(TAPLO_VERSION) is required. Run: make tools" >&2; exit 1; }
+
+cargo-deny-version:
+	@cargo-deny --version 2>/dev/null | grep -qx 'cargo-deny $(CARGO_DENY_VERSION)' || { echo "cargo-deny $(CARGO_DENY_VERSION) is required. Run: make tools" >&2; exit 1; }

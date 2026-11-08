@@ -1,0 +1,43 @@
+# `make audit` checks Cargo.lock against this policy with cargo-deny.
+
+[graph]
+# Optional features such as api-doc add crates, so every feature is checked.
+all-features = true
+
+[advisories]
+# Vulnerability and notice advisories always fail.
+# Unsound and unmaintained advisories fail for every crate, not only direct dependencies.
+unsound = "all"
+unmaintained = "all"
+yanked = "deny"
+# Ignore an advisory only with its reason: { id = "RUSTSEC-YYYY-NNNN", reason = "..." },
+ignore = []
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "BSL-1.0",
+  "Unlicense",
+]
+# A generated service may need fewer of them, so an unused one is not reported.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Workspace crates set publish = false, so they need no license field.
+ignore = true
+
+[bans]
+# Duplicate crate versions are not reported, so warnings cannot hide a failure.
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
