@@ -41,7 +41,7 @@ def jobs(text):
 
 # A condition or continue-on-error on this step would let a failed audit pass the job.
 AUDIT_STEP = "      - name: Audit dependencies\n        run: make audit"
-# This runs the audit after a later check fails, but not without cargo-deny installed.
+# This runs the audit after an earlier check fails, but not without cargo-deny installed.
 # It never lets a failed audit pass.
 AUDIT_STEP_ALWAYS = ("      - name: Audit dependencies\n"
                      "        if: ${{ !cancelled() && steps.deny.outcome == 'success' }}\n"

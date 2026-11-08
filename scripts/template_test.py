@@ -261,7 +261,7 @@ def check_generated(project, *, fast_only=False, structure_only=False):
     if structure_only:
         return
     environment = cargo_environment()
-    # Full mode runs make check without its audit, which audit_generated runs once per variant.
+    # Full mode mirrors `check:` in the Makefile without `audit`, which audit_generated runs later.
     targets = ["lint", "test"] if fast_only else ["lint", "test", "test-db"]
     for feature in ("", "api-doc"):
         command = ["make", *targets, f"FEATURES={feature}"]
@@ -371,7 +371,7 @@ def main():
               "PostgreSQL checks were NOT run.")
     else:
         print("Template twins and both generated variants passed default and api-doc lint, fast and "
-              "database tests, and the audit: every part of make check.")
+              "database tests, and the audit.")
 
 
 if __name__ == "__main__":
