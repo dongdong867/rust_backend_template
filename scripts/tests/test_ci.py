@@ -462,7 +462,6 @@ class CiPolicyTest(unittest.TestCase):
                 self.assertNotIn("bot result comment is published", text.replace("\n", " "))
                 self.assertNotIn("Actions-only", text)
                 self.assertNotIn("Completed runs receive one updated bot result comment", text)
-                self.assertIn("Historical `ci-comment` statuses", text)
 
     def test_guidance_names_the_command_cache_write_risk(self):
         # The worker runs on the default branch, so PR code can write its cache scope.

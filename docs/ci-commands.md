@@ -64,7 +64,7 @@ Only Actions-authored records are accepted; corrupt or foreign records fail clos
 Repositories with multiple root commits are refused; do not rewrite history while runs are active.
 GitHub's status-count limits still apply; bookkeeping API failures require inspection, not a success fallback.
 
-## Result statuses and rollout
+## Result statuses
 
 After binding the worker, the controller marks the captured head `pending` and links the status to that worker run.
 A dispatch failure marks it `error` instead.
@@ -91,19 +91,11 @@ Make failures stop further feature modes and propagate a nonzero result; unknown
 Statuses belong to a commit, so a new head starts without a result.
 PRs sharing a head SHA share its status; the last reported request wins because both tested identical code.
 Package contexts add a short hash of the exact command because GitHub status contexts are case-insensitive.
-No completion workflow, bot result comment, log-summary download, test-count report or coverage comparison is part of this flow.
-Historical `ci-comment` statuses may remain pending and are deliberately not rewritten or treated as passing results.
-Do not configure them, controller jobs, worker jobs or internal cursor contexts as a required-check gate.
-`ci-command /test` is not a required check, by decision after security review.
-GitHub matches required checks by name.
-Pinning the expected app does not help: a fork PR workflow also reports as GitHub Actions and can create a passing check with the same name.
+Do not configure controller jobs, worker jobs or internal cursor contexts as a required-check gate.
+`ci-command /test` is not a required check either, because GitHub matches required checks by name.
+A fork PR workflow also reports as GitHub Actions and can create a passing check with the same name, so pinning the expected app does not help.
 
-The controller, worker and execution helpers must reach the default branch before hosted QA can exercise this version.
-Both generated variants retain the same execution support.
-Hosted validation must cover exact syntax and authorization; edited comments before routing/acceptance; successful and failed lint/full/package execution and their head statuses; unknown packages; exact captured heads; cancellation, timeout and their error statuses; independent PRs/commands; duplicate/rerun rejection; and fork-head access.
-Private-fork support needs its own environment and permission checks.
-Local port tests and generation checks do not prove hosted token permissions, event delivery, scheduling or fork access.
-Unperformed actor, fork or error checks remain unverified.
+The controller, worker and execution helpers work only from the default branch, and generated services keep them unchanged.
 
 ## Workflow checker compatibility
 

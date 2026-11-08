@@ -131,7 +131,7 @@ The VM builds the image from a release tag, so no image registry is needed; it c
 - Docker Engine with Compose 2.24.0 or later, started at boot, a deploy user in the `docker` group, and `curl`.
 - nginx.
 - A PostgreSQL server on another host, or a managed one, that the VM can reach, with the application's database created. For TLS settings, see [Database transport and connection options](#database-transport-and-connection-options).
-  This recipe does not cover a PostgreSQL on the VM itself: a container reaches the VM only through Docker's networks, which needs PostgreSQL, `pg_hba.conf` and firewall changes the recipe has not tested.
+  This recipe does not cover a PostgreSQL on the VM itself.
 - A clone of this repository at `/srv/rust-backend-template`, owned by the deploy user.
 
 Keep the settings outside the checkout, readable only by the deploy user. Running this again keeps an existing file's contents:
@@ -290,12 +290,8 @@ GitHub pauses scheduled workflows in a public repository after 60 days without a
 Pull request workflows use read-only `pull_request` permissions, optional caches, and no production secrets or databases.
 For public repositories, in **Settings > Actions > General**, select **Require approval for all external contributors** for workflows from fork pull requests.
 For private repositories with fork workflows enabled, the corresponding approval policy covers fork contributors without write permission, not trusted collaborators' own pull requests.
-Repository approval settings are not copied by generation; configure the applicable policy separately. This documentation change does not change GitHub settings.
+Repository approval settings are not copied by generation; configure the applicable policy separately.
 Dependabot opens weekly grouped Cargo and GitHub Actions dependency proposals; auto-merge is not enabled.
-
-See **Actions > workflow run > job** for actual elapsed job time.
-Repository or organization **Settings > Billing and licensing > Usage** shows billed Actions minutes (billing access is required).
-Elapsed time and billed minutes differ; there are no runtime guarantees.
 
 ### Maintainer-requested checks
 
@@ -310,11 +306,9 @@ On an open pull request, create a comment containing exactly one command:
 For example, `/test-environment` tests the configuration package; `/test-rust-backend-template` tests the service package.
 Use Cargo package names, not Rust import names, directories, arguments or wildcards.
 These checks are database-free; partial runs compile dependencies but do not run other packages' suites.
-There are no additional comment commands.
 
 The commenter needs repository write, maintain or admin permission; association labels alone are not authorization.
 Comments on issues, edits, extra whitespace and unauthorized commands do not dispatch workers.
-Routing and acceptance both require GitHub's explicit unedited-comment metadata; timestamp equality alone cannot detect same-second edits.
 Each accepted command captures the current head SHA. A changed head needs a fresh command; an earlier run checks only its captured commit.
 Another identical command supersedes its earlier run, while different commands, packages and PRs execute independently.
 Repeat checks with a new comment, not **Re-run jobs** or manual worker dispatch.
@@ -324,8 +318,6 @@ Package commands add a short hash suffix, so `/test-Foo` and `/test-foo` keep se
 The status is pending while the worker runs, then success or failure. It is error when the run was cancelled or timed out, the head changed or validation failed.
 Its details link opens the **CI command worker** run with the ordinary logs.
 A new commit has no status until someone posts a new command.
-The original comment stays plain text; no bot comment, test-count report or coverage comparison is published.
-Historical `ci-comment` statuses may remain pending; they are not completion evidence or supported required checks.
 Do not require controller jobs, worker jobs or `ci-command-state/` bookkeeping contexts as a merge gate.
 
 The dispatcher, read-only worker and execution helpers are retained in generated services.
@@ -335,7 +327,6 @@ That code can write default-branch cache entries that later workflows can restor
 The controller uses trusted default-branch code and never executes the PR or its artifacts.
 Only the controller and the worker's separate report job can write commit statuses, and neither checks out PR code; no command job has PR-comment write permission.
 See [the security and hosted-validation procedure](docs/ci-commands.md) for the execution and bookkeeping boundaries.
-This change does not enable branch protection or modify repository settings.
 
 ### Release a version
 
