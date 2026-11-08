@@ -262,13 +262,25 @@ def check_generated(project, *, fast_only=False, structure_only=False):
         return
     environment = cargo_environment()
     targets = ["lint", "test"] if fast_only else ["check"]
-    commands = [["make", *targets, f"FEATURES={feature}"] for feature in ("", "api-doc")]
-    if fast_only:
-        # The audit ignores FEATURES. It runs last so lint and test results report first.
-        commands.append(["make", "audit"])
-    for command in commands:
+    for feature in ("", "api-doc"):
+        command = ["make", *targets, f"FEATURES={feature}"]
         print("+", " ".join(command), flush=True)
         subprocess.run(command, cwd=project, env=environment, check=True)
+
+
+def audit_generated(projects):
+    """Audit every project once, so one variant's advisory does not hide another's result.
+
+    The audit ignores FEATURES. Fast mode runs it after every other variant check.
+    """
+    environment = cargo_environment()
+    failed = []
+    for project in projects:
+        print("+ make audit", f"({project.name})", flush=True)
+        result = subprocess.run(["make", "audit"], cwd=project, env=environment, check=False)
+        if result.returncode != 0:
+            failed.append(project.name)
+    require(not failed, f"make audit failed in: {', '.join(failed)}")
 
 
 def built_executables(project, environment):
@@ -335,6 +347,7 @@ def main():
         canonical = generate(executable, source, temporary / "canonical", CANONICAL_NAME, True,
                              template_source=True)
         check_twins(source, canonical)
+        projects = []
         for include_tasks in (True, False):
             name = "generated-with-example" if include_tasks else "generated-without-example"
             project = generate(executable, source, temporary / "variants", name, include_tasks)
@@ -342,6 +355,10 @@ def main():
             check_generated(project, fast_only=args.fast_only,
                             structure_only=args.structure_only)
             check_migration_rebuild(project, include_tasks, structure_only=args.structure_only)
+            projects.append(project)
+        if args.fast_only:
+            # Full mode audits through make check.
+            audit_generated(projects)
     if args.structure_only:
         print("Generation structure and locked metadata passed; full make check was NOT run.")
     elif args.fast_only:

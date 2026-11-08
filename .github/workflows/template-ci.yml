@@ -84,4 +84,5 @@ jobs:
       - name: Both generated variants and feature modes
         run: make template-test-fast
       - name: Audit dependencies
+        if: ${{ !cancelled() }}
         run: make audit

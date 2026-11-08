@@ -41,6 +41,9 @@ def jobs(text):
 
 # A condition or continue-on-error on this step would let a failed audit pass the job.
 AUDIT_STEP = "      - name: Audit dependencies\n        run: make audit"
+# `!cancelled()` runs the audit after an earlier step fails; it never lets a failed audit pass.
+AUDIT_STEP_ALWAYS = ("      - name: Audit dependencies\n        if: ${{ !cancelled() }}\n"
+                     "        run: make audit")
 
 
 def audit_steps(job):
@@ -84,9 +87,10 @@ class CiPolicyTest(unittest.TestCase):
         audit = validate.index("        run: make audit\n")
         self.assertLess(validate.index("id: tools"), install)
         self.assertLess(install, audit)
-        # Clippy, tests and the generated variants report before an advisory fails the job.
+        # Clippy, tests and the generated variants report before an advisory fails the job,
+        # and the source audit still reports after one of them fails.
         self.assertLess(validate.index("make template-test-fast"), audit)
-        self.assertEqual(audit_steps(validate), [AUDIT_STEP])
+        self.assertEqual(audit_steps(validate), [AUDIT_STEP_ALWAYS])
 
     def test_audit_runs_weekly_and_by_hand_on_the_default_branch(self):
         text = self.workflow("audit.yml")

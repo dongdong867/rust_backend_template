@@ -276,7 +276,7 @@ The pre-commit hook remains database-free.
 Private-repository formatting installs pinned prebuilt Taplo rather than compiling it.
 
 {% if template_source %}The source-only `.github/workflows/template-ci.yml` is excluded from generation by `.genignore`.
-It runs Clippy and fast tests with default features and `api-doc`, database-free checks of both generated variants that include the audit, and then the dependency audit, on reviewable pull requests and pushes to `main`.
+It runs Clippy and fast tests with default features and `api-doc`, database-free checks of both generated variants that include the audit, and then the dependency audit of the template source, which still runs after an earlier step fails, on reviewable pull requests and pushes to `main`.
 Source drafts run formatting only: `ready_for_review` starts heavy validation, and `converted_to_draft` cancels it.
 Generated services retain formatting-only defaults regardless of repository visibility, with no `main`-push automation.
 Pull request and `main` CI do not replace full `make check` (default and `FEATURES=api-doc`) or `make template-test`; these still require the existing dedicated `TEST_DATABASE_URL` server.

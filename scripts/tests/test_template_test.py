@@ -118,11 +118,9 @@ class TemplateChecksTest(unittest.TestCase):
                 for project in (self.source, self.output):
                     template_test.check_generated(project, fast_only=fast_only)
                 targets = ["lint", "test"] if fast_only else ["check"]
-                # The audit ignores FEATURES, so fast mode runs it once per variant.
+                # Fast mode audits each variant later, through audit_generated.
                 variant = [["make", *targets, f"FEATURES={feature}"]
                            for feature in ("", "api-doc")]
-                if fast_only:
-                    variant.append(["make", "audit"])
                 self.assertEqual([call.args[0] for call in run.call_args_list], variant * 2)
                 for call in run.call_args_list:
                     self.assertTrue(call.kwargs["check"])
@@ -135,6 +133,29 @@ class TemplateChecksTest(unittest.TestCase):
                 calls = len(variant)
                 self.assertEqual([call.kwargs["cwd"] for call in run.call_args_list],
                                  [self.source] * calls + [self.output] * calls)
+
+    def test_audit_generated_reports_every_failed_variant(self):
+        def result(command, cwd, env, check):
+            return subprocess.CompletedProcess(command, 1 if cwd == self.source else 0)
+
+        with patch.object(template_test.subprocess, "run", side_effect=result) as run, \
+                patch.dict(os.environ, {"DATABASE_URL": "synthetic-application-database"}):
+            with self.assertRaisesRegex(RuntimeError, "make audit failed in: source$"):
+                template_test.audit_generated([self.source, self.output])
+        # A failed variant does not stop the next variant's audit.
+        self.assertEqual([(call.args[0], call.kwargs["cwd"]) for call in run.call_args_list],
+                         [(["make", "audit"], self.source), (["make", "audit"], self.output)])
+        for call in run.call_args_list:
+            self.assertFalse(call.kwargs["check"])
+            self.assertFalse("DATABASE_URL" in call.kwargs["env"])
+
+    def test_audit_generated_passes_when_every_variant_passes(self):
+        def result(command, cwd, env, check):
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(template_test.subprocess, "run", side_effect=result) as run:
+            template_test.audit_generated([self.source, self.output])
+        self.assertEqual(run.call_count, 2)
 
     def test_structure_only_does_not_run_make(self):
         with patch.object(template_test.subprocess, "run") as run:
