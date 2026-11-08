@@ -12,7 +12,7 @@ Run `make test` during normal test-driven development; it never contacts Postgre
 Run `make test-db` after changing SQL, migrations, database types, row mapping or database concurrency.
 Run `make check` on the complete publication candidate; it includes lint, the dependency audit, fast tests and real database tests.
 `make audit` checks `Cargo.lock` against RustSec advisories, the license allowlist and the crates.io-only source rule in `deny.toml`. It needs cargo-deny from `make tools` and network access.
-Fix an advisory by upgrading the crate, and a license or source finding by replacing the dependency. Ignore an advisory only by listing its ID with the reason in `deny.toml`.
+Fix a vulnerable, unsound or yanked crate by upgrading it, and an unmaintained crate or a license or source finding by replacing the dependency. Ignore an advisory only by listing its ID with the reason in `deny.toml`.
 Database tests require `TEST_DATABASE_URL` pointing to an already-running dedicated test server with permission to create isolated databases.
 Never start PostgreSQL automatically on a developer machine or add database tests to the pre-commit hook.
 Only the release workflow starts PostgreSQL, a temporary server for `make test-db`.
