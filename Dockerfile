@@ -10,7 +10,7 @@ RUN cargo build --locked --release -p rust-backend-template --bins \
     && cp target/release/rust-backend-template target/release/migrate /out/
 
 # Distroless cc: the C runtime and CA certificates only, with no shell or package manager.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 COPY --from=build /out/ /usr/local/bin/
 USER nonroot
 EXPOSE 8080
